@@ -281,6 +281,10 @@ public class ConfigWindow : Window
         ToggleRow("Stay under game windows", Config.StayUnderGameWindows, v => Config.StayUnderGameWindows = v,
             "Menus, dialogues and tooltips sit on top of the map instead of under it. If a square hole ever shows up in the map with "
             + "nothing there, see Diagnostics: it names the window responsible and can ignore it.");
+        if (Config.StayUnderGameWindows)
+            ToggleRow("Stay under the HUD", Config.StayUnderHud, v => Config.StayUnderHud = v,
+                "Hotbars, HP bars, the party list, job gauges, the chat and notices like the loot one sit on top of the map too. "
+                + "Off, only menus and dialogues do, and the map draws over the HUD.");
         ToggleRow("Hide game minimap", Config.HideGameMinimap, v => Config.HideGameMinimap = v,
             "Hides the game's own minimap, ring and buttons included, for a cleaner screen with MoogleMap a key away. "
             + "Put back as soon as you turn this off.");
@@ -424,8 +428,16 @@ public class ConfigWindow : Window
 
         var view = Config.ViewFor(editKind);
         FloatRow("Zoom", view.Zoom, v => view.Zoom = v, Plugin.MinZoom, Plugin.MaxZoom, "%.1f px/yalm");
+        ToggleRow("Fit small places", Config.FitSmallAreas, v => Config.FitSmallAreas = v,
+            "Zooms in further on small places, like inn rooms, trial arenas and short dungeon floors, so they fill the map instead of a "
+            + "corner of it. Never zooms out past the setting above. Places mapped by exploring are fitted once the mapping is done.");
         FloatRow("Radius", view.Radius, v => view.Radius = v, 0.15f, 0.6f, "%.2f");
         HelpAfter("How big the map is, as a share of your screen height.");
+        FloatRow("Width", view.Width, v => view.Width = v, 0.3f, 1f, "%.2f");
+        HelpAfter("How much of the circle shows side to side. Lower trims the left and right off, without shrinking anything. "
+                  + "With a bigger radius, a lower height gives a wide strip that sees further left and right.");
+        FloatRow("Height", view.Height, v => view.Height = v, 0.3f, 1f, "%.2f");
+        HelpAfter("How much of the circle shows top to bottom. Lower trims the top and bottom off, without shrinking anything.");
         FloatRow("Map opacity", view.MapOpacity, v => view.MapOpacity = v, 0.1f, 1f, "%.2f");
         Row(string.Empty);
         if (Theme.GhostButton("Reset this view", new Vector2(150, 26)))
@@ -517,6 +529,8 @@ public class ConfigWindow : Window
                 "A ring around each party member that empties with their health, red and pulsing when they're low. The knocked out show a skull, "
                 + "green once a raise is waiting for them, and go back to normal as soon as they're up.");
         }
+        ToggleRow("My health", Config.SelfHealth, v => Config.SelfHealth = v,
+            "The same health ring around your own arrow: green, yellow under half, red and pulsing when you're low.");
         ToggleRow("Other players", Config.ShowPlayers, v => Config.ShowPlayers = v);
         ToggleRow("Enemies", Config.ShowEnemies, v => Config.ShowEnemies = v, "Enemies already in a fight are drawn in the combat colour and pulse.");
         if (Config.ShowEnemies)
@@ -528,7 +542,10 @@ public class ConfigWindow : Window
         ToggleRow("Camera cone", Config.ShowViewCone, v => Config.ShowViewCone = v);
         ToggleRow("Compass", Config.ShowCompass, v => Config.ShowCompass = v, "N, E, S and W inside the map, turning with it. North in gold.");
         if (Config.ShowCompass)
+        {
             FloatRow("Compass distance", Config.CompassInset, v => Config.CompassInset = v, 0.4f, 0.95f, "%.2f");
+            FloatRow("Compass size", Config.CompassScale, v => Config.CompassScale = v, 0.5f, 2f, "%.2fx");
+        }
         ToggleRow("Target ring", Config.ShowTargetRing, v => Config.ShowTargetRing = v, "A turning ring around whatever you have targeted.");
 
         ImGui.Dummy(new Vector2(0, 8));
@@ -853,7 +870,7 @@ public class ConfigWindow : Window
         sb.AppendLine($"- Game language: {Plugin.ClientState.ClientLanguage}, territory {Plugin.ClientState.TerritoryType}, map {Plugin.ClientState.MapId}");
         sb.AppendLine($"- Map: {map?.Key ?? "-"} \"{map?.DisplayName}\", scale {map?.Scale:0.00}, offset {map?.Offset}, texture {OnOff(map?.HasTexture == true)}");
         sb.AppendLine($"- Processing: {plugin.Maps.Status}, picture {OnOff(plugin.Maps.FromPicture)}, paper {plugin.Maps.PaperShare:P0}, floor {plugin.Maps.FloorShare:P1}");
-        sb.AppendLine($"- Settings: trigger {Config.Trigger} on {Config.ToggleKey}, place {plugin.CurrentKind}, zoom {plugin.View.Zoom:0.0}, radius {plugin.View.Radius:0.00}, "
+        sb.AppendLine($"- Settings: trigger {Config.Trigger} on {Config.ToggleKey}, place {plugin.CurrentKind}, zoom {plugin.View.Zoom:0.0} (shown {plugin.Zoom:0.0}, area {plugin.Maps.AreaSize?.ToString("0") ?? "-"} y), radius {plugin.View.Radius:0.00}, "
                       + $"rotate {OnOff(Config.RotateWithCamera)}, anchor {Config.Anchor}, explore {OnOff(Config.ExploreUnmapped)}");
         sb.AppendLine($"- State: hidden {plugin.HiddenReason ?? "no"}, shown {OnOff(Config.Shown)}, frame errors {plugin.FrameErrors}, "
                       + $"explorer {plugin.ExplorerMode} {plugin.Explorer.FloorCells} cells / {plugin.Explorer.Raycasts} raycasts, fused {plugin.Maps.FusedCells}");

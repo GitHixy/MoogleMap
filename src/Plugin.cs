@@ -57,6 +57,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] public static IKeyState KeyState { get; private set; } = null!;
     [PluginService] public static IDtrBar DtrBar { get; private set; } = null!;
     [PluginService] public static ITargetManager TargetManager { get; private set; } = null!;
+    [PluginService] public static IChatGui ChatGui { get; private set; } = null!;
 
     /// <summary>Plugin-wide logger: writes to Dalamud's log and keeps a copy for the Diagnostics page.</summary>
     public static DiagnosticsLog Log { get; } = new(() => DalamudLog);
@@ -98,7 +99,7 @@ public sealed class Plugin : IDalamudPlugin
 
             CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
             {
-                HelpMessage = "Open MoogleMap settings\n→ /mooglemap toggle - Show or hide the map\n→ /mooglemap zoom in|out - Zoom the map\n→ /mooglemap explore reset - Forget the explored floor"
+                HelpMessage = "Open MoogleMap settings\n→ /mooglemap toggle - Show or hide the map\n→ /mooglemap zoom in|out - Zoom the map\n→ /mooglemap explore reset - Forget the explored floor\n→ /mooglemap dump - Save the current map and what was traced from it, for bug reports"
             });
             CommandManager.AddHandler(CommandAlt, new CommandInfo(OnCommand) { ShowInHelp = false });
 
@@ -140,6 +141,7 @@ public sealed class Plugin : IDalamudPlugin
             ServerBar?.Dispose();
             ConfigWindow?.Dispose();
             Maps?.Dispose();
+            Overlay?.Dispose();
             ConfigService?.Dispose();
 
             CommandManager.RemoveHandler(CommandName);
@@ -173,6 +175,13 @@ public sealed class Plugin : IDalamudPlugin
             case "zoom" when parts.Length > 1 && parts[1] is "out" or "-":
                 ZoomBy(0.8f);
                 break;
+            case "dump":
+                var folder = Maps.Dump(System.IO.Path.Combine(PluginInterface.ConfigDirectory.FullName, "dump"));
+                if (folder is null)
+                    ChatGui.Print("[MoogleMap] No map picture here to save.");
+                else
+                    ChatGui.Print($"[MoogleMap] Map saved to {folder}");
+                break;
             case "explore" when parts.Length > 1 && parts[1] == "reset":
                 ResetExplored();
                 Log.Info("Explored floor forgotten");
@@ -196,7 +205,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public void ZoomBy(float factor)
     {
-        View.Zoom = Math.Clamp(View.Zoom * factor, MinZoom, MaxZoom);
+        // From the zoom on screen, so zooming in on a fitted small area works straight away.
+        View.Zoom = Math.Clamp(Zoom * factor, MinZoom, MaxZoom);
         ConfigService.Save();
     }
 
@@ -318,6 +328,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // Open fields get a little more time: there's far more ground to cover.
         var budget = Maps.Current?.IsOpenWorld == true ? 1.5 : 1.0;
+        Explorer.Bounds = mode == ExploreMode.Survey ? Maps.Bounds : null;
         Explorer.Update(player, Live.Seeds, ExplorerReach(mode), budget);
 
         if (mode == ExploreMode.Survey && Explorer.Dirty && Now >= saveExploredAt)
@@ -352,6 +363,30 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>Zoom, size and opacity for where the player is now.</summary>
     public ViewPreset View => Configuration.ViewFor(CurrentKind);
+
+    /// <summary>
+    /// The zoom actually shown: the view's own, or closer when the place is small enough that it
+    /// would only fill part of the map.
+    /// </summary>
+    public float Zoom
+    {
+        get
+        {
+            var view = View;
+            if (!Configuration.FitSmallAreas || Maps.AreaSize is not { } size || size < 1f)
+                return view.Zoom;
+
+            // Explored floor grows as it's found, so it only tells how big a place is once the
+            // mapping is done. Fields are only ever mapped around you.
+            if (!Maps.FromPicture && (Maps.Current?.IsOpenWorld != false || MappingProgress is not null))
+                return view.Zoom;
+
+            // The area's longest side spans most of the circle's width, at 1080p.
+            var shape = MathF.Sqrt(Math.Clamp(view.Width, 0.3f, 1f) * Math.Clamp(view.Height, 0.3f, 1f));
+            var fit = 2f * view.Radius * shape * 1080f * 0.85f / size;
+            return Math.Max(view.Zoom, Math.Min(fit, MaxZoom));
+        }
+    }
 
     public bool ReducedMotion => Configuration.ReducedMotion switch
     {

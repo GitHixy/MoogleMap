@@ -13,7 +13,7 @@ namespace MoogleMap.Rendering;
 public static class GameWindows
 {
     /// <summary>Past this many pieces the screen is too busy to cut up; the map is simply drawn.</summary>
-    private const int MaxPieces = 24;
+    private const int MaxPieces = 48;
 
     private static readonly List<(Vector2 Min, Vector2 Max)> Blockers = [];
     private static readonly List<(Vector2 Min, Vector2 Max)> Pieces = [];
@@ -27,8 +27,9 @@ public static class GameWindows
     /// Rectangles of the screen the map may draw in this frame, or null when no game window is
     /// in the way. Only windows overlapping <paramref name="area"/> (the map's bounds) matter.
     /// </summary>
+    /// <param name="hud">Keep the HUD (bars, party list, gauges, notifications) on top too, not just windows.</param>
     public static unsafe IReadOnlyList<(Vector2 Min, Vector2 Max)>? FreeAreas(Vector2 origin, Vector2 screen, Vector2 areaMin, Vector2 areaMax,
-        ICollection<string> ignored)
+        ICollection<string> ignored, bool hud)
     {
         Blockers.Clear();
         Names.Clear();
@@ -47,7 +48,7 @@ public static class GameWindows
             if (unit->Alpha == 0 || unit->RootNode->Color.A == 0) continue;
 
             var name = unit->NameString;
-            if (IsHud(name) || ignored.Contains(name)) continue;
+            if (IsOverlay(name) || (!hud && IsHud(name)) || ignored.Contains(name)) continue;
 
             var min = origin + new Vector2(unit->X, unit->Y);
             var size = new Vector2(unit->GetScaledWidth(true), unit->GetScaledHeight(true));
@@ -83,25 +84,42 @@ public static class GameWindows
     }
 
     /// <summary>
-    /// The HUD stays under the map, like it always has: only real windows (menus, dialogues,
-    /// tooltips) are kept clear. HUD elements are the addons whose names start with an underscore.
+    /// HUD elements: bars, party list, gauges, the chat, notifications. Their names start with an
+    /// underscore, apart from the chat and the job gauges.
     /// </summary>
     private static bool IsHud(string name)
-        => name.Length == 0 || name[0] == '_'
+        => name[0] == '_'
            || name.StartsWith("ChatLog", StringComparison.Ordinal)
+           // Job gauges are HUD too, though unlike the rest their names have no underscore. A
+           // gauge not unlocked yet is still loaded and "visible" with its contents hidden.
+           || name.StartsWith("JobHud", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Layers that are never kept clear: they cover the whole screen or float over the world, and
+    /// cutting the map around them would leave holes with nothing in them.
+    /// </summary>
+    private static bool IsOverlay(string name)
+        => name.Length == 0
            || name.StartsWith("NamePlate", StringComparison.Ordinal)
            || name.StartsWith("ScreenInfo", StringComparison.Ordinal)
            || name.StartsWith("Fade", StringComparison.Ordinal)
-           // Job gauges are HUD too, though unlike the rest their names have no underscore. A
-           // gauge not unlocked yet is still loaded and "visible" with its contents hidden.
-           || name.StartsWith("JobHud", StringComparison.Ordinal)
            // Speech bubbles over NPCs' heads, and other overlays that come and go on their own.
            || name.StartsWith("MiniTalk", StringComparison.Ordinal)
            || name.StartsWith("Bubble", StringComparison.Ordinal)
            || name.StartsWith("FlyText", StringComparison.Ordinal)
            || name.StartsWith("PopUpText", StringComparison.Ordinal)
            || name.StartsWith("ScreenLog", StringComparison.Ordinal)
-           || name.StartsWith("TargetCursor", StringComparison.Ordinal);
+           || name.StartsWith("TargetCursor", StringComparison.Ordinal)
+           // Big text across the middle of the screen: zone names, errors, duty messages.
+           || name.StartsWith("_ScreenText", StringComparison.Ordinal)
+           || name.StartsWith("_AreaText", StringComparison.Ordinal)
+           || name.StartsWith("_WideText", StringComparison.Ordinal)
+           || name.StartsWith("_TextError", StringComparison.Ordinal)
+           || name.StartsWith("_TextClassChange", StringComparison.Ordinal)
+           || name.StartsWith("_LocationTitle", StringComparison.Ordinal)
+           || name.StartsWith("_PopUpText", StringComparison.Ordinal)
+           || name.StartsWith("_FlyText", StringComparison.Ordinal)
+           || name.StartsWith("_MiniTalk", StringComparison.Ordinal);
 
     /// <summary>Names of the windows the map was kept clear of on the last frame.</summary>
     public static IReadOnlyList<string> CoveringNames => Names;

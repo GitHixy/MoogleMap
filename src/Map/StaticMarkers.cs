@@ -12,12 +12,25 @@ public readonly record struct StaticMarker(Vector2 Position, uint Icon, string L
 public sealed class StaticMarkers
 {
     private readonly List<StaticMarker> markers = [];
+    /// <summary>Where the icons sit in the world, X/Z.</summary>
+    private readonly List<Vector2> iconsInWorld = [];
 
     public IReadOnlyList<StaticMarker> All => markers;
+
+    /// <summary>Whether the map already prints an icon within <paramref name="yalms"/> of a world X/Z position.</summary>
+    public bool HasIconNear(Vector2 world, float yalms)
+    {
+        var reach = yalms * yalms;
+        foreach (var icon in iconsInWorld)
+            if (Vector2.DistanceSquared(icon, world) <= reach)
+                return true;
+        return false;
+    }
 
     public void Load(MapInfo? map)
     {
         markers.Clear();
+        iconsInWorld.Clear();
         if (map is null || map.MarkerRange == 0) return;
 
         try
@@ -32,6 +45,8 @@ public sealed class StaticMarkers
 
                 // Without an icon the entry is a region name printed straight onto the map.
                 markers.Add(new StaticMarker(new Vector2(row.X, row.Y), row.Icon, label, row.SubtextOrientation, row.Icon == 0));
+                if (row.Icon != 0)
+                    iconsInWorld.Add(map.TextureToWorld(new Vector2(row.X, row.Y)));
             }
         }
         catch (Exception ex)

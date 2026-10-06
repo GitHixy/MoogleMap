@@ -10,8 +10,19 @@ namespace MoogleMap.Rendering;
 public readonly struct MapView
 {
     public Vector2 Center { get; init; }
-    /// <summary>Visible radius in pixels.</summary>
+    /// <summary>Radius of the map's circle in pixels, before any trimming.</summary>
     public float Radius { get; init; }
+    /// <summary>
+    /// How much of the width and height of the circle is shown, 0 to 1. (1, 1) is the whole
+    /// circle; (1, 0.5) trims it top and bottom to a wide oval, at the same scale.
+    /// </summary>
+    public Vector2 Stretch
+    {
+        get => stretch == Vector2.Zero ? Vector2.One : stretch;
+        init => stretch = value;
+    }
+
+    private readonly Vector2 stretch;
     /// <summary>Where the map's rim starts to fade, as a fraction of the radius.</summary>
     public float FadeStart { get; init; }
     public Vector2 Origin { get; init; }
@@ -49,10 +60,23 @@ public readonly struct MapView
     /// <summary>Screen direction of a game rotation, where 0 faces south (+Z).</summary>
     public Vector2 Facing(float rotation) => Direction(new Vector2(MathF.Sin(rotation), MathF.Cos(rotation)));
 
+    /// <summary>Half the map's width and height, in pixels.</summary>
+    public Vector2 Radii => Stretch * Radius;
+
+    /// <summary>How far out a screen point is: 0 at the centre, 1 on the rim, whatever the map's shape.</summary>
+    public float Reach(Vector2 screen) => ((screen - Center) / Radii).Length();
+
+    /// <summary>Distance from the centre to the rim along a screen direction, in pixels.</summary>
+    public float RimDistance(Vector2 direction)
+    {
+        var length = (direction / Radii).Length();
+        return length < 1e-6f ? Radius : direction.Length() / length;
+    }
+
     /// <summary>How visible a point is: full inside, fading over the rim, gone outside.</summary>
     public float Fade(Vector2 screen)
     {
-        var t = Vector2.Distance(screen, Center) / Radius;
+        var t = Reach(screen);
         if (t <= FadeStart) return 1f;
         if (t >= 1f) return 0f;
         var x = 1f - (t - FadeStart) / (1f - FadeStart);
@@ -63,7 +87,8 @@ public readonly struct MapView
     public Vector2 ClampToRim(Vector2 screen, float inset, out bool clamped)
     {
         var d = screen - Center;
-        var max = Radius * FadeStart + (Radius - Radius * FadeStart) * 0.35f - inset;
+        var rim = RimDistance(d);
+        var max = rim * FadeStart + (rim - rim * FadeStart) * 0.35f - inset;
         var len = d.Length();
         clamped = len > max;
         return clamped ? Center + d / len * max : screen;

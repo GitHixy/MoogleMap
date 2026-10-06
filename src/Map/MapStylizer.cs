@@ -12,8 +12,10 @@ namespace MoogleMap.Map;
 public sealed record StylizedMap(int Size, byte[] Rgba, float PaperShare, float FloorShare, IReadOnlyList<WallLine> Walls, bool[] Traced)
 {
     /// <summary>
-    /// For towns: the area the picture draws as built-up, rooftops included. Explored floor only
-    /// counts inside it, which keeps the seabed off the map while piers and docks stay on it.
+    /// Where explored floor may be added. For towns, the area the picture draws as built-up,
+    /// rooftops included, which keeps the seabed off the map while piers and docks stay on it. For
+    /// maps traced from the picture, a margin around the traced floor: exploring fills in what the
+    /// picture missed there, but the collision past a duty's invisible walls is scenery.
     /// </summary>
     public bool[]? Footprint { get; init; }
 
@@ -36,6 +38,8 @@ public sealed record StylizedMap(int Size, byte[] Rgba, float PaperShare, float 
 /// </remarks>
 public static class MapStylizer
 {
+    /// <summary>How far past the floor a picture draws, in yalms, exploring may still add floor.</summary>
+    private const float PictureMargin = 8f;
     /// <summary>Below this share of identical paper pixels a map is painted, not drawn as a plan.</summary>
     private const float FlatPaperShare = 0.4f;
 
@@ -43,7 +47,8 @@ public static class MapStylizer
     /// Processes a BGRA texture. Pure CPU work with no game calls, so it is safe on a worker thread.
     /// </summary>
     /// <param name="openWorld">Open fields are painted edge to edge and walkable nearly everywhere; they get no footprint.</param>
-    public static StylizedMap Run(byte[] bgra, int size, Vector4 colour, bool openWorld)
+    /// <param name="scale">The map's texture pixels per yalm.</param>
+    public static StylizedMap Run(byte[] bgra, int size, Vector4 colour, bool openWorld, float scale)
     {
         var n = size / 2;
         var (paper, share) = PaperColour(bgra);
@@ -59,7 +64,10 @@ public static class MapStylizer
 
             // A trace that found next to nothing is a map that is mostly scenery; leave it to exploring.
             if (count > n * n / 2000)
-                return Paint(floor, n, colour, share) with { FromPicture = true };
+            {
+                var margin = Math.Max(2, (int)MathF.Round(PictureMargin * scale * n / size));
+                return Paint(floor, n, colour, share) with { FromPicture = true, Footprint = Dilate(floor, n, margin) };
+            }
         }
 
         var empty = new StylizedMap(n, new byte[n * n * 4], share, 0f, [], new bool[n * n]);
@@ -72,7 +80,9 @@ public static class MapStylizer
     /// so far, not a previous fusion.
     /// </summary>
     /// <param name="cells">Walkable cells in world space, <paramref name="cell"/> yalms square.</param>
-    public static StylizedMap Fuse(StylizedMap source, MapInfo map, IReadOnlyList<(int X, int Z)> cells, float cell, Vector4 colour)
+    /// <param name="sides">Blocked sides between walkable cells: walls too thin to leave a gap in them.</param>
+    public static StylizedMap Fuse(StylizedMap source, MapInfo map, IReadOnlyList<(int X, int Z)> cells,
+        IReadOnlyList<CellSide> sides, float cell, Vector4 colour)
     {
         var n = source.Size;
         var floor = (bool[])source.Traced.Clone();
@@ -99,15 +109,126 @@ public static class MapStylizer
                 }
         }
 
-        if (added == 0)
+        if (added == 0 && sides.Count == 0)
             return source;
 
-        // Cells are coarse next to the picture; closing seals the seams between them, and filling
-        // small holes swallows benches, stalls and fountains, which aren't walls.
-        floor = Erode(Dilate(floor, n, 1), n, 1);
-        Fill(floor, n, target: false, maxArea: Math.Max(60, (int)(10f * map.Scale * map.Scale)));
+        // Cells are coarse next to the picture; closing seals the seams between the two. Explored
+        // floor alone lines up with the pixels and has no seams, and closing it would erase thin
+        // walls and narrow doorways.
+        if (source.FromPicture)
+            floor = Erode(Dilate(floor, n, 1), n, 1);
 
-        return Paint(floor, n, colour, source.PaperShare) with { FromPicture = source.FromPicture, Footprint = source.Footprint };
+        // Holes of a few square yalms are lamp posts, crates and missed cells, and only add noise.
+        // Fountains, stalls and buildings are bigger and stay on the map.
+        var pixelsPerYalm = map.Scale * toProcessed;
+        Fill(floor, n, target: false, maxArea: Math.Max(1, (int)(SmallestHole * pixelsPerYalm * pixelsPerYalm)));
+
+        var painted = Paint(floor, n, colour, source.PaperShare);
+        var walls = new List<WallLine>(painted.Walls);
+        walls.AddRange(SideWalls(sides, map, cell, floor, n));
+        return painted with { Walls = walls, FromPicture = source.FromPicture, Footprint = source.Footprint };
+    }
+
+    /// <summary>Holes in explored floor up to this many square yalms are filled in.</summary>
+    private const float SmallestHole = 6f;
+    /// <summary>Thin walls shorter than this many yalms, counting every side they're joined to, are left out.</summary>
+    private const int ShortestWall = 3;
+
+    /// <summary>
+    /// Thin walls as lines along the cell sides they block, in map texture pixels. Runs of sides
+    /// along the same line are joined, so a long fence is one line rather than a dashed one, and
+    /// lone bits (a post, a sign, a crate) are dropped.
+    /// </summary>
+    private static List<WallLine> SideWalls(IReadOnlyList<CellSide> sides, MapInfo map, float cell, bool[] floor, int n)
+    {
+        var toProcessed = (float)n / MapInfo.TextureSize;
+        bool IsFloor(int x, int z)
+        {
+            var p = map.WorldToTexture(new Vector3((x + 0.5f) * cell, 0f, (z + 0.5f) * cell)) * toProcessed;
+            var px = (int)p.X;
+            var py = (int)p.Y;
+            return px >= 0 && py >= 0 && px < n && py < n && floor[py * n + px];
+        }
+
+        // East sides run north-south along x + 1, south sides east-west along z + 1. Group by that
+        // line and sort along it, so neighbours in a run come one after another.
+        var runs = new List<(bool East, int Line, int At)>();
+        foreach (var side in sides)
+        {
+            var (nx, nz) = side.East ? (side.X + 1, side.Z) : (side.X, side.Z + 1);
+            if (!IsFloor(side.X, side.Z) || !IsFloor(nx, nz)) continue;
+            runs.Add(side.East ? (true, side.X + 1, side.Z) : (false, side.Z + 1, side.X));
+        }
+        runs = DropShort(runs);
+        runs.Sort();
+
+        var lines = new List<WallLine>();
+        for (var i = 0; i < runs.Count;)
+        {
+            var (east, line, first) = runs[i];
+            var last = first;
+            var j = i + 1;
+            while (j < runs.Count && runs[j].East == east && runs[j].Line == line && runs[j].At == last + 1)
+                last = runs[j++].At;
+            i = j;
+
+            Vector3 World(int along) => east
+                ? new Vector3(line * cell, 0f, along * cell)
+                : new Vector3(along * cell, 0f, line * cell);
+            var a = map.WorldToTexture(World(first));
+            var b = map.WorldToTexture(World(last + 1));
+            lines.Add(new WallLine([a, b], Vector2.Min(a, b), Vector2.Max(a, b), false));
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Keeps the sides that join up, end to end or at corners, into walls of at least
+    /// <see cref="ShortestWall"/> sides. A fence at an angle comes out as a staircase of short
+    /// sides; joined at their corners they still count as one long wall.
+    /// </summary>
+    private static List<(bool East, int Line, int At)> DropShort(List<(bool East, int Line, int At)> runs)
+    {
+        // Each side joins two grid corners; sides sharing a corner belong to the same wall.
+        var parent = new Dictionary<long, long>();
+        long Find(long v)
+        {
+            while (parent.TryGetValue(v, out var p) && p != v)
+            {
+                var grand = parent.TryGetValue(p, out var g) ? g : p;
+                parent[v] = grand;
+                v = grand;
+            }
+            return v;
+        }
+        void Union(long a, long b)
+        {
+            parent.TryAdd(a, a);
+            parent.TryAdd(b, b);
+            var ra = Find(a);
+            var rb = Find(b);
+            if (ra != rb) parent[ra] = rb;
+        }
+        static long Corner(int x, int z) => (long)x << 32 | (uint)z;
+        static (long A, long B) Ends((bool East, int Line, int At) side) => side.East
+            ? (Corner(side.Line, side.At), Corner(side.Line, side.At + 1))
+            : (Corner(side.At, side.Line), Corner(side.At + 1, side.Line));
+
+        foreach (var side in runs)
+        {
+            var (a, b) = Ends(side);
+            Union(a, b);
+        }
+
+        var size = new Dictionary<long, int>();
+        foreach (var side in runs)
+        {
+            var root = Find(Ends(side).A);
+            size[root] = size.GetValueOrDefault(root) + 1;
+        }
+
+        return runs.FindAll(side => size[Find(Ends(side).A)] >= ShortestWall);
     }
 
     // ------------------------------------------------------------------

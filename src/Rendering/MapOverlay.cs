@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.GameFonts;
+using Dalamud.Interface.ManagedFontAtlas;
 using Dalamud.Interface.Textures;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using MoogleMap.Map;
@@ -14,13 +16,16 @@ namespace MoogleMap.Rendering;
 /// icons, then everything live, then you. All of it goes on the background draw list, under every
 /// ImGui window and over the game.
 /// </summary>
-public sealed class MapOverlay
+public sealed class MapOverlay : IDisposable
 {
     /// <summary>Cells per side of the mesh the map texture is drawn on. Per-vertex alpha gives the soft rim.</summary>
     private const int Grid = 36;
 
     private readonly Plugin plugin;
     private readonly ExploredMesh explored = new();
+    /// <summary>The game's own headline font, for the compass: big and crisp where a scaled-up ImGui font goes soft.</summary>
+    private readonly IFontHandle compassFont =
+        Plugin.PluginInterface.UiBuilder.FontAtlas.NewGameFontHandle(new GameFontStyle(GameFontFamilyAndSize.TrumpGothic34));
 
     private float shown;
     private float zoom;
@@ -51,9 +56,9 @@ public sealed class MapOverlay
             shown = MoveTowards(shown, target, dt * (visible ? 7.5f : 5.5f));
 
         if (zoom <= 0f || reduced)
-            zoom = plugin.View.Zoom;
+            zoom = plugin.Zoom;
         else
-            zoom += (plugin.View.Zoom - zoom) * Math.Clamp(dt * 12f, 0f, 1f);
+            zoom += (plugin.Zoom - zoom) * Math.Clamp(dt * 12f, 0f, 1f);
 
         if (shown <= 0.001f) return;
 
@@ -68,7 +73,7 @@ public sealed class MapOverlay
         var viewport = ImGui.GetMainViewport();
         var reach = new Vector2(view.Radius + 40f * view.PixelScale);
         var free = config.StayUnderGameWindows
-            ? GameWindows.FreeAreas(viewport.Pos, viewport.Size, view.Center - reach, view.Center + reach, config.IgnoredWindows)
+            ? GameWindows.FreeAreas(viewport.Pos, viewport.Size, view.Center - reach, view.Center + reach, config.IgnoredWindows, config.StayUnderHud)
             : null;
         if (free is null)
         {
@@ -152,7 +157,7 @@ public sealed class MapOverlay
         var width = Math.Max(text.X + (field ? 22f : 36f) * px, (field ? 120f : 190f) * px);
         var height = text.Y + (field ? 12f : 20f) * px;
         var centre = field
-            ? view.Center + new Vector2(0f, view.Radius * view.FadeStart * 0.9f - height * 0.5f)
+            ? view.Center + new Vector2(0f, view.Radii.Y * view.FadeStart * 0.9f - height * 0.5f)
             : view.Center - new Vector2(0f, 46f * px + height * 0.5f);
         var min = centre - new Vector2(width, height) * 0.5f;
         var max = centre + new Vector2(width, height) * 0.5f;
@@ -180,8 +185,8 @@ public sealed class MapOverlay
             center = feet;
         center += config.Offset * viewport.Size;
 
-        if (config.RotateWithCamera)
-            cameraForward = CameraForward() ?? cameraForward;
+        // Read even with north up: the camera cone still follows it.
+        cameraForward = CameraForward() ?? cameraForward;
         var (cos, sin) = config.RotateWithCamera ? MapView.FacingUp(cameraForward) : (1f, 0f);
 
         // A slight grow as it fades in sells the "unfolding" without getting in the way.
@@ -192,6 +197,8 @@ public sealed class MapOverlay
         {
             Center = center,
             Radius = plugin.View.Radius * viewport.Size.Y * grow,
+            // Width and height only trim the circle; its size and the map's scale stay put.
+            Stretch = new Vector2(Math.Clamp(plugin.View.Width, 0.3f, 1f), Math.Clamp(plugin.View.Height, 0.3f, 1f)),
             FadeStart = 1f - Math.Clamp(config.EdgeFade, 0.02f, 0.9f),
             Origin = new Vector2(player.X, player.Z),
             Scale = zoom * pixelScale * grow,
@@ -461,36 +468,54 @@ public sealed class MapOverlay
         var px = view.PixelScale;
         var colour = config.EdgeColor;
 
-        var radius = view.Radius * ease;
-        dl.AddCircle(view.Center, radius, Draw2D.Color(colour, fade * 0.25f), 96, 10f * px);
-        dl.AddCircle(view.Center, radius, Draw2D.Color(colour, fade * 0.9f), 96, 2.5f * px);
+        var radii = view.Radii * ease;
+        Ring(dl, view.Center, radii, Draw2D.Color(colour, fade * 0.25f), 10f * px);
+        Ring(dl, view.Center, radii, Draw2D.Color(colour, fade * 0.9f), 2.5f * px);
 
-        var echo = view.Radius * Math.Max(0f, ease - 0.12f);
-        if (echo > 2f)
-            dl.AddCircle(view.Center, echo, Draw2D.Color(colour, fade * 0.35f), 96, 1.5f * px);
+        var echo = view.Radii * Math.Max(0f, ease - 0.12f);
+        if (echo.X > 2f && echo.Y > 2f)
+            Ring(dl, view.Center, echo, Draw2D.Color(colour, fade * 0.35f), 1.5f * px);
+    }
+
+    /// <summary>A ring the shape of the map: a circle, or an ellipse when it's stretched.</summary>
+    private static void Ring(ImDrawListPtr dl, Vector2 centre, Vector2 radii, uint colour, float thickness)
+    {
+        const int segments = 96;
+        for (var i = 0; i < segments; i++)
+        {
+            var a = MathF.PI * 2f * i / segments;
+            dl.PathLineTo(centre + new Vector2(MathF.Cos(a) * radii.X, MathF.Sin(a) * radii.Y));
+        }
+        dl.PathStroke(colour, ImDrawFlags.Closed, thickness);
     }
 
     /// <summary>
     /// N, E, S and W, turning with the map. They sit well inside the rim rather than on it, so in
     /// big open areas they don't crowd the edge where markers and the fade already are.
     /// </summary>
-    private static void DrawCompass(ImDrawListPtr dl, MapView view, Configuration config)
+    private void DrawCompass(ImDrawListPtr dl, MapView view, Configuration config)
     {
-        var distance = view.Radius * Math.Clamp(config.CompassInset, 0.4f, 0.95f);
+        var inset = Math.Clamp(config.CompassInset, 0.4f, 0.95f);
         var alpha = view.Alpha * config.MarkerOpacity;
         ReadOnlySpan<(string Letter, Vector2 World)> points =
         [
             ("N", new Vector2(0f, -1f)), ("E", new Vector2(1f, 0f)), ("S", new Vector2(0f, 1f)), ("W", new Vector2(-1f, 0f)),
         ];
 
+        // Falls back to the ImGui font, scaled, for the moment the game font is still loading.
+        using var locked = compassFont.Available ? compassFont.Lock() : null;
+        var font = locked?.ImFont ?? ImGui.GetFont();
+        var size = 34f * view.PixelScale * Math.Clamp(config.CompassScale, 0.5f, 2f);
+
         foreach (var (letter, world) in points)
         {
-            var at = view.Center + view.Direction(world) * distance;
+            var direction = view.Direction(world);
+            var at = view.Center + direction * view.RimDistance(direction) * inset;
             var north = letter == "N";
             var colour = north ? Draw2D.Gold : Draw2D.Parchment;
             var a = alpha * (north ? 0.85f : 0.45f) * view.Fade(at);
             if (a <= 0.01f) continue;
-            Draw2D.Label(dl, at, letter, colour, a, north ? 0.95f : 0.8f, centered: true);
+            Draw2D.Label(dl, font, (north ? 1f : 0.82f) * size, at, letter, colour, a, centered: true);
         }
     }
 
@@ -540,13 +565,17 @@ public sealed class MapOverlay
         }
     }
 
-    private static void DrawKinds(ImDrawListPtr dl, MapView view, Configuration config, IReadOnlyList<LiveMarker> markers,
+    private void DrawKinds(ImDrawListPtr dl, MapView view, Configuration config, IReadOnlyList<LiveMarker> markers,
         float alpha, float time, params MarkerKind[] kinds)
     {
         var px = view.PixelScale;
         foreach (var m in markers)
         {
             if (Array.IndexOf(kinds, m.Kind) < 0) continue;
+
+            // Aetherytes and shards are already on the map as its own icons; one is enough.
+            if (m.Kind == MarkerKind.Aetheryte && config.ShowMapIcons && plugin.Maps.Markers.HasIconNear(new Vector2(m.Position.X, m.Position.Z), 6f))
+                continue;
 
             var s = view.ToScreen(m.Position);
 
@@ -704,7 +733,7 @@ public sealed class MapOverlay
     }
 
     /// <summary>
-    /// A ring around a party member that empties with their health: green, yellow under half,
+    /// A ring around you or a party member that empties with their health: green, yellow under half,
     /// red and pulsing under a quarter.
     /// </summary>
     private static void DrawHealth(ImDrawListPtr dl, Vector2 at, float r, float health, float alpha, float time, float px)
@@ -869,8 +898,13 @@ public sealed class MapOverlay
         if (config.Effects && config.EffectRipple && !plugin.ReducedMotion)
             Effects.Ripple(dl, s, px, (float)plugin.Now, alpha);
 
+        if (config.SelfHealth && plugin.Live.PlayerHealth is { } health)
+            DrawHealth(dl, s, 13f * px, health, alpha, (float)plugin.Now, px);
+
         Draw2D.Arrow(dl, s, view.Facing(plugin.Live.PlayerRotation), 9f * px, alpha);
     }
+
+    public void Dispose() => compassFont.Dispose();
 
     /// <summary>Forgets per-zone state.</summary>
     public void Reset() => explored.Invalidate();

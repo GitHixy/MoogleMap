@@ -51,6 +51,10 @@ public class ViewPreset
     public float Zoom { get; set; } = 5f;
     /// <summary>Radius of the visible map as a fraction of screen height.</summary>
     public float Radius { get; set; } = 0.42f;
+    /// <summary>How much of the circle's width is shown: 1 all of it, less trims the sides.</summary>
+    public float Width { get; set; } = 1f;
+    /// <summary>How much of the circle's height is shown: 1 all of it, less trims top and bottom.</summary>
+    public float Height { get; set; } = 1f;
     /// <summary>Multiplies the opacity of the whole map layer, markers excluded.</summary>
     public float MapOpacity { get; set; } = 0.85f;
 
@@ -88,6 +92,8 @@ public class Configuration
     public bool HideGameMinimap { get; set; }
     /// <summary>Cut the map around open game windows so menus sit on top of it.</summary>
     public bool StayUnderGameWindows { get; set; } = true;
+    /// <summary>Also keep the HUD (bars, party list, gauges, loot notices) on top of the map.</summary>
+    public bool StayUnderHud { get; set; } = true;
     /// <summary>Game windows the map never makes room for, by addon name.</summary>
     public HashSet<string> IgnoredWindows { get; set; } = [];
 
@@ -110,6 +116,8 @@ public class Configuration
     // Placement
     /// <summary>Zoom, size and opacity for each kind of place, so a dungeon and a field each look right.</summary>
     public Dictionary<ContentKind, ViewPreset> Views { get; set; } = new();
+    /// <summary>Zoom in on small places, like trial arenas, until they fill the map instead of a corner of it.</summary>
+    public bool FitSmallAreas { get; set; } = true;
     /// <summary>Turn the map with the camera so "up" is where you're looking. Off is north-up.</summary>
     public bool RotateWithCamera { get; set; } = true;
     public MapAnchor Anchor { get; set; } = MapAnchor.Screen;
@@ -168,6 +176,8 @@ public class Configuration
     public bool ShowCompass { get; set; } = true;
     /// <summary>How far out the compass letters sit, as a fraction of the map's radius.</summary>
     public float CompassInset { get; set; } = 0.72f;
+    /// <summary>Multiplies the size of the compass letters.</summary>
+    public float CompassScale { get; set; } = 1f;
     /// <summary>Your camera's field of view, drawn as a soft cone from your marker.</summary>
     public bool ShowViewCone { get; set; } = true;
     public float IconScale { get; set; } = 1f;
@@ -187,6 +197,8 @@ public class Configuration
     public bool PartyJobs { get; set; }
     /// <summary>Health rings around party members, and a skull for the knocked out.</summary>
     public bool PartyHealth { get; set; } = true;
+    /// <summary>The same health ring around your own arrow.</summary>
+    public bool SelfHealth { get; set; } = true;
     public Vector4 TankColor { get; set; } = new(0.36f, 0.56f, 0.96f, 1f);
     public Vector4 HealerColor { get; set; } = new(0.42f, 0.82f, 0.42f, 1f);
     public Vector4 DpsColor { get; set; } = new(0.86f, 0.36f, 0.36f, 1f);

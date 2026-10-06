@@ -71,6 +71,14 @@ public sealed class MapService : IDisposable
     public float FloorShare { get; private set; }
     /// <summary>Whether the floor on screen is (partly) traced from the map picture, rather than only explored.</summary>
     public bool FromPicture { get; private set; }
+    /// <summary>
+    /// Where exploring may go on the current map, by world X/Z, or null for anywhere. Set for maps
+    /// traced from their picture: past what the picture draws is scenery, not the duty.
+    /// </summary>
+    public Func<float, float, bool>? Bounds { get; private set; }
+
+    /// <summary>Longest side of the floor on screen, in yalms, or null when there's none yet.</summary>
+    public float? AreaSize { get; private set; }
     /// <summary>Explored cells in the texture on screen.</summary>
     public int FusedCells { get; private set; }
     public int CachedMaps
@@ -116,12 +124,12 @@ public sealed class MapService : IDisposable
         }
     }
 
-    private (int X, int Z)[] Cells(Explorer? survey)
+    private ((int X, int Z)[] Cells, CellSide[] Sides) Cells(Explorer? survey)
     {
-        if (survey is null) return [];
+        if (survey is null) return ([], []);
         fusedRevision = survey.Revision;
         snapshotCell = survey.Cell;
-        return survey.Snapshot();
+        return (survey.Snapshot(), survey.Walls());
     }
 
     /// <summary>Draw-thread hook: brings in finished maps, advances fades and frees what faded out.</summary>
@@ -182,6 +190,8 @@ public sealed class MapService : IDisposable
         frontSince = now;
 
         FromPicture = done.Shown.FromPicture;
+        Bounds = done.Shown is { FromPicture: true, Footprint: { } area } ? Inside(done.Map, area, done.Shown.Size) : null;
+        AreaSize = Extent(done.Shown.Walls, done.Map);
         PaperShare = done.Shown.PaperShare;
         FloorShare = done.Shown.FloorShare;
         FusedCells = done.Cells;
@@ -210,6 +220,8 @@ public sealed class MapService : IDisposable
 
         FusedCells = 0;
         Current = null;
+        AreaSize = null;
+        Bounds = null;
 
         if (mapId != 0 && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Map>().GetRowOrDefault(mapId) is { } row)
             Current = new MapInfo(row);
@@ -230,8 +242,9 @@ public sealed class MapService : IDisposable
             Plugin.Log.Debug("Map changed to {Id} ({Key}) {Name}", mapId, Current?.Key ?? "-", Current?.DisplayName ?? "-");
     }
 
-    private void Load(MapInfo map, Vector4 colour, (int X, int Z)[] cells)
+    private void Load(MapInfo map, Vector4 colour, ((int X, int Z)[] Cells, CellSide[] Sides) explored)
     {
+        var (cells, sides) = explored;
         loading?.Cancel();
         var cts = new CancellationTokenSource();
         loading = cts;
@@ -245,7 +258,7 @@ public sealed class MapService : IDisposable
             var traced = Traced(map, colour, cts.Token);
 
             cts.Token.ThrowIfCancellationRequested();
-            var shown = cells.Length > 0 ? MapStylizer.Fuse(traced, map, cells, cell, colour) : traced;
+            var shown = cells.Length > 0 ? MapStylizer.Fuse(traced, map, cells, sides, cell, colour) : traced;
             cts.Token.ThrowIfCancellationRequested();
 
             var texture = await Plugin.TextureProvider.CreateFromRawAsync(
@@ -300,7 +313,7 @@ public sealed class MapService : IDisposable
                    ?? throw new InvalidOperationException($"Map texture {map.TexturePath} not found");
         var buffer = file.TextureBuffer.Filter(0, 0, TexFile.TextureFormat.B8G8R8A8);
         token.ThrowIfCancellationRequested();
-        var traced = MapStylizer.Run(buffer.RawData, buffer.Width, colour, map.IsOpenWorld);
+        var traced = MapStylizer.Run(buffer.RawData, buffer.Width, colour, map.IsOpenWorld, map.Scale);
 
         lock (gate)
         {
@@ -354,10 +367,126 @@ public sealed class MapService : IDisposable
         }, cts.Token);
     }
 
+    private static Func<float, float, bool> Inside(MapInfo map, bool[] area, int n)
+    {
+        var toProcessed = n / MapInfo.TextureSize;
+        return (x, z) =>
+        {
+            var p = map.WorldToTexture(new Vector3(x, 0f, z)) * toProcessed;
+            var px = (int)p.X;
+            var py = (int)p.Y;
+            return px >= 0 && py >= 0 && px < n && py < n && area[py * n + px];
+        };
+    }
+
+    private static float? Extent(IReadOnlyList<WallLine> walls, MapInfo map)
+    {
+        if (walls.Count == 0) return null;
+        var min = new Vector2(float.MaxValue);
+        var max = new Vector2(float.MinValue);
+        foreach (var wall in walls)
+        {
+            min = Vector2.Min(min, wall.Min);
+            max = Vector2.Max(max, wall.Max);
+        }
+
+        var size = max - min;
+        return Math.Max(size.X, size.Y) / map.Scale;
+    }
+
     private static float Ease(double t)
     {
         var x = (float)Math.Clamp(t, 0, 1);
         return x * x * (3f - 2f * x);
+    }
+
+    /// <summary>
+    /// Saves the current map picture, and the same picture with the floor (blue) and walls (red)
+    /// found on it, to look at outside the game. Returns the folder, or null when there's no map.
+    /// </summary>
+    public string? Dump(string folder)
+    {
+        if (Current is not { HasTexture: true } map) return null;
+
+        var file = Plugin.DataManager.GetFile<TexFile>(map.TexturePath);
+        if (file is null) return null;
+        var buffer = file.TextureBuffer.Filter(0, 0, TexFile.TextureFormat.B8G8R8A8);
+        var size = buffer.Width;
+        var bgra = buffer.RawData;
+
+        System.IO.Directory.CreateDirectory(folder);
+        var name = map.Key.Replace("/", "_");
+
+        var original = new byte[size * size * 4];
+        for (var k = 0; k < size * size; k++)
+        {
+            original[k * 4] = bgra[k * 4 + 2];
+            original[k * 4 + 1] = bgra[k * 4 + 1];
+            original[k * 4 + 2] = bgra[k * 4];
+            original[k * 4 + 3] = 255;
+        }
+        Services.PngWriter.Write(System.IO.Path.Combine(folder, $"{name}_original.png"), original, size, size);
+
+        // The traced floor, at the processed resolution, over the picture.
+        var traced = Traced(map, requested, CancellationToken.None);
+        var n = traced.Size;
+        var step = size / n;
+        var marked = new byte[n * n * 4];
+        for (var y = 0; y < n; y++)
+        {
+            for (var x = 0; x < n; x++)
+            {
+                var src = (y * step * size + x * step) * 4;
+                var o = (y * n + x) * 4;
+                var r = original[src] * 0.6f;
+                var g = original[src + 1] * 0.6f;
+                var b = original[src + 2] * 0.6f;
+                if (traced.Traced[y * n + x])
+                {
+                    r = r * 0.5f + 20f;
+                    g = g * 0.5f + 70f;
+                    b = b * 0.5f + 127f;
+                }
+                marked[o] = (byte)Math.Min(255f, r);
+                marked[o + 1] = (byte)Math.Min(255f, g);
+                marked[o + 2] = (byte)Math.Min(255f, b);
+                marked[o + 3] = 255;
+            }
+        }
+
+        // Walls as drawn, which include what exploring added.
+        var walls = front?.Map.RowId == map.RowId ? front.Walls : traced.Walls;
+        foreach (var wall in walls)
+        {
+            var count = wall.Closed ? wall.Points.Length : wall.Points.Length - 1;
+            for (var i = 0; i < count; i++)
+            {
+                var a = wall.Points[i] / step;
+                var b = wall.Points[(i + 1) % wall.Points.Length] / step;
+                var steps = (int)MathF.Ceiling(Vector2.Distance(a, b) * 2f) + 1;
+                for (var t = 0; t <= steps; t++)
+                {
+                    var p = Vector2.Lerp(a, b, t / (float)steps);
+                    var x = (int)p.X;
+                    var y = (int)p.Y;
+                    if (x < 0 || y < 0 || x >= n || y >= n) continue;
+                    var o = (y * n + x) * 4;
+                    marked[o] = 255;
+                    marked[o + 1] = 40;
+                    marked[o + 2] = 40;
+                }
+            }
+        }
+        Services.PngWriter.Write(System.IO.Path.Combine(folder, $"{name}_traced.png"), marked, n, n);
+
+        System.IO.File.WriteAllText(System.IO.Path.Combine(folder, $"{name}_info.txt"),
+            $"map {map.RowId} {map.Key} \"{map.DisplayName}\" territory {map.TerritoryId}\n"
+            + $"kind {map.Kind}, scale {map.Scale}, offset {map.Offset}\n"
+            + $"paper {traced.PaperShare:P1}, traced floor {traced.FloorShare:P2}, from picture {traced.FromPicture}, footprint {traced.Footprint is not null}\n"
+            + $"traced walls {traced.Walls.Count}, drawn walls {walls.Count}, explored cells {FusedCells}\n"
+            + $"status: {Status}\n");
+
+        return folder;
     }
 
     /// <summary>Called on logout: drop everything tied to the old map.</summary>
@@ -374,6 +503,8 @@ public sealed class MapService : IDisposable
         visible.Clear();
         FusedCells = 0;
         Current = null;
+        AreaSize = null;
+        Bounds = null;
         Markers.Load(null);
         Status = "No map yet";
     }

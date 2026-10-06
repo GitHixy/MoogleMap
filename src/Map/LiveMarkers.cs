@@ -100,6 +100,8 @@ public sealed class LiveMarkers
 
     public Vector3? PlayerPosition { get; private set; }
     public float PlayerRotation { get; private set; }
+    /// <summary>The player's health from 0 to 1, or null when not known.</summary>
+    public float? PlayerHealth { get; private set; }
 
     /// <summary>Where the player's current target is, and how big, whatever kind of thing it is.</summary>
     public (Vector3 Position, float Radius)? Target { get; private set; }
@@ -127,6 +129,7 @@ public sealed class LiveMarkers
         var me = Plugin.ObjectTable.LocalPlayer;
         PlayerPosition = me?.Position;
         PlayerRotation = me?.Rotation ?? 0f;
+        PlayerHealth = me is { MaxHp: > 0 } ? Math.Clamp(me.CurrentHp / (float)me.MaxHp, 0f, 1f) : null;
 
         var target = Plugin.TargetManager.Target;
         Target = target is null ? null : (target.Position, target.HitboxRadius);

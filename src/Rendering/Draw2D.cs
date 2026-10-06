@@ -164,9 +164,21 @@ public static class Draw2D
     /// <summary>Text with a soft dark shadow, so it reads over any background.</summary>
     public static void Label(ImDrawListPtr dl, Vector2 at, string text, Vector4 c, float alpha, float scale, bool centered = false)
     {
-        var font = ImGui.GetFont();
-        var size = ImGui.GetFontSize() * scale;
         var extent = ImGui.CalcTextSize(text) * scale;
+        Text(dl, ImGui.GetFont(), ImGui.GetFontSize() * scale, extent, at, text, c, alpha, centered);
+    }
+
+    /// <summary>A label in a given font, <paramref name="size"/> pixels tall.</summary>
+    public static void Label(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 at, string text, Vector4 c, float alpha, bool centered = false)
+    {
+        ImGui.PushFont(font);
+        var extent = ImGui.CalcTextSize(text) * (size / ImGui.GetFontSize());
+        ImGui.PopFont();
+        Text(dl, font, size, extent, at, text, c, alpha, centered);
+    }
+
+    private static void Text(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 extent, Vector2 at, string text, Vector4 c, float alpha, bool centered)
+    {
         var pos = centered ? at - extent * 0.5f : at;
         pos = new Vector2(MathF.Round(pos.X), MathF.Round(pos.Y));
 
