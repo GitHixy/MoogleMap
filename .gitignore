@@ -1,0 +1,72 @@
+# Build output
+bin/
+obj/
+*.dll
+*.pdb
+*.cache
+*.tmp
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+*.pidb
+*.booproj
+*.swp
+*~
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Plugin specific
+*.zip
+*.latest.zip
+
+# Plugin configuration copied out of Dalamud's config folder
+config.json
+
+# Python (tools/make_icon.py)
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Temporary files
+temp/
+tmp/
+
+# NuGet
+packages/
+*.nupkg
+
+# MSBuild
+*.binlog
+
+# NCrunch
+*.ncrunch*
+.*crunch*.local.xml
+
+# Resharper
+_ReSharper*/
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# dotCover
+*.dotCover
+
+# Backup files
+*.bak
+*.backup
+*~

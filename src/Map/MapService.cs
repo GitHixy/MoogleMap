@@ -1,0 +1,396 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
+using Dalamud.Interface.Textures;
+using Dalamud.Interface.Textures.TextureWraps;
+using Lumina.Data.Files;
+using MoogleMap.Models;
+
+namespace MoogleMap.Map;
+
+/// <summary>One processed map ready to draw: fill texture and wall lines, and how visible it is right now.</summary>
+public sealed record MapLayer(MapInfo Map, IDalamudTextureWrap Texture, IReadOnlyList<WallLine> Walls)
+{
+    public float Alpha { get; set; }
+}
+
+/// <summary>
+/// Follows the map the player is on and keeps a processed texture of it ready to draw.
+/// </summary>
+/// <remarks>
+/// Processing happens on worker threads, and nothing ever pops: a new version of the map fades in
+/// over the old one, and a map left behind fades out. Processed maps are kept in memory, and the
+/// other maps of the same territory (a dungeon's other floors, a town's districts) are prepared
+/// in the background as soon as the first is up, so moving between them is instant.
+/// While the explorer finds more floor, the map is redrawn with it every couple of seconds.
+/// </remarks>
+public sealed class MapService : IDisposable
+{
+    /// <summary>Seconds between redraws while the explorer keeps finding floor.</summary>
+    private const double FuseInterval = 1.5;
+    /// <summary>Seconds a new version takes to fade in, and an old one to fade out.</summary>
+    private const double FadeTime = 0.4;
+    /// <summary>Processed maps kept in memory.</summary>
+    private const int CacheSize = 10;
+
+    private sealed record Result(MapInfo Map, IDalamudTextureWrap Texture, StylizedMap Shown, int Cells, long Milliseconds);
+
+    private readonly object gate = new();
+    private readonly List<IDalamudTextureWrap> retired = [];
+    private readonly List<(MapLayer Layer, double Since)> fading = [];
+    private readonly List<MapLayer> visible = [];
+
+    /// <summary>Maps as traced from their picture alone, by map and floor colour, most recent last.</summary>
+    private readonly LinkedList<((uint Map, Vector4 Colour) Key, StylizedMap Map)> cache = new();
+
+    private CancellationTokenSource? loading;
+    private CancellationTokenSource? prefetching;
+    private Result? pending;
+
+    private MapLayer? front;
+    private double frontSince;
+
+    private Vector4 requested;
+    private bool logEvents;
+    private double restyleAt = double.MaxValue;
+    private int fusedRevision = -1;
+    /// <summary>Cell size of the last explorer snapshot, needed to place its cells on the map.</summary>
+    private float snapshotCell = 1f;
+    private double fuseAt;
+
+    public MapInfo? Current { get; private set; }
+    /// <summary>What to draw this frame, oldest first, each with its fade.</summary>
+    public IReadOnlyList<MapLayer> Layers => visible;
+    public bool Loading => loading is not null;
+    public string Status { get; private set; } = "No map yet";
+    public float PaperShare { get; private set; }
+    public float FloorShare { get; private set; }
+    /// <summary>Whether the floor on screen is (partly) traced from the map picture, rather than only explored.</summary>
+    public bool FromPicture { get; private set; }
+    /// <summary>Explored cells in the texture on screen.</summary>
+    public int FusedCells { get; private set; }
+    public int CachedMaps
+    {
+        get { lock (gate) return cache.Count; }
+    }
+
+    /// <summary>The static icons and names of the current map.</summary>
+    public StaticMarkers Markers { get; } = new();
+
+    /// <summary>
+    /// Framework tick: notices map changes, settings that need a new texture, and new floor from
+    /// the explorer worth redrawing for. Pass null when the explorer isn't surveying this map.
+    /// </summary>
+    public void Update(Configuration config, double now, Explorer? survey)
+    {
+        logEvents = config.LogEvents;
+        var mapId = Plugin.ClientState.MapId;
+        if (mapId != (Current?.RowId ?? 0))
+            SwitchTo(mapId, config, survey, now);
+
+        if (Current is not { HasTexture: true } map)
+            return;
+
+        if (config.FloorColor != requested)
+        {
+            // Colour pickers fire every frame while dragged; wait for them to settle.
+            requested = config.FloorColor;
+            restyleAt = now + 0.35;
+        }
+
+        if (now >= restyleAt)
+        {
+            restyleAt = double.MaxValue;
+            Load(map, requested, Cells(survey));
+            return;
+        }
+
+        if (survey is not null && survey.Revision != fusedRevision && now >= fuseAt && !Loading)
+        {
+            fuseAt = now + FuseInterval;
+            Load(map, requested, Cells(survey));
+        }
+    }
+
+    private (int X, int Z)[] Cells(Explorer? survey)
+    {
+        if (survey is null) return [];
+        fusedRevision = survey.Revision;
+        snapshotCell = survey.Cell;
+        return survey.Snapshot();
+    }
+
+    /// <summary>Draw-thread hook: brings in finished maps, advances fades and frees what faded out.</summary>
+    public void BeginFrame(double now, bool reducedMotion)
+    {
+        foreach (var old in retired)
+            old.Dispose();
+        retired.Clear();
+
+        Result? done;
+        lock (gate)
+        {
+            done = pending;
+            pending = null;
+        }
+
+        if (done is not null)
+            Present(done, now);
+
+        var fadeTime = reducedMotion ? 1e-3 : FadeTime;
+        visible.Clear();
+
+        for (var i = 0; i < fading.Count; i++)
+        {
+            var (layer, since) = fading[i];
+            var t = Ease((now - since) / fadeTime);
+            if (t >= 1f)
+            {
+                retired.Add(layer.Texture);
+                fading.RemoveAt(i--);
+                continue;
+            }
+
+            layer.Alpha = 1f - t;
+            visible.Add(layer);
+        }
+
+        if (front is not null)
+        {
+            front.Alpha = Ease((now - frontSince) / fadeTime);
+            visible.Add(front);
+        }
+    }
+
+    private void Present(Result done, double now)
+    {
+        if (done.Map.RowId != (Current?.RowId ?? 0))
+        {
+            // Finished after the player had already moved on.
+            done.Texture.Dispose();
+            return;
+        }
+
+        if (front is not null)
+            fading.Add((front, now));
+
+        front = new MapLayer(done.Map, done.Texture, done.Shown.Walls);
+        frontSince = now;
+
+        FromPicture = done.Shown.FromPicture;
+        PaperShare = done.Shown.PaperShare;
+        FloorShare = done.Shown.FloorShare;
+        FusedCells = done.Cells;
+        Status = done.Shown.Walls.Count > 0
+            ? $"{done.Shown.Walls.Count} walls, ready in {done.Milliseconds} ms"
+            : "Nothing yet: the floor fills in as it's explored";
+        if (logEvents)
+            Plugin.Log.Debug("Map {Map} ready: {Walls} walls, picture {Picture}, {Cells} explored cells, {Ms} ms",
+                done.Map.Key, done.Shown.Walls.Count, done.Shown.FromPicture, done.Cells, done.Milliseconds);
+    }
+
+    private void SwitchTo(uint mapId, Configuration config, Explorer? survey, double now)
+    {
+        loading?.Cancel();
+        loading = null;
+        prefetching?.Cancel();
+        prefetching = null;
+        fusedRevision = -1;
+
+        // The old map fades out on its own; it isn't dropped here.
+        if (front is not null)
+        {
+            fading.Add((front, now));
+            front = null;
+        }
+
+        FusedCells = 0;
+        Current = null;
+
+        if (mapId != 0 && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Map>().GetRowOrDefault(mapId) is { } row)
+            Current = new MapInfo(row);
+
+        Markers.Load(Current);
+
+        if (Current is null)
+            Status = "No map";
+        else if (!Current.HasTexture)
+            Status = "The game has no picture of this map";
+        else
+        {
+            requested = config.FloorColor;
+            Load(Current, requested, Cells(survey));
+        }
+
+        if (config.LogEvents)
+            Plugin.Log.Debug("Map changed to {Id} ({Key}) {Name}", mapId, Current?.Key ?? "-", Current?.DisplayName ?? "-");
+    }
+
+    private void Load(MapInfo map, Vector4 colour, (int X, int Z)[] cells)
+    {
+        loading?.Cancel();
+        var cts = new CancellationTokenSource();
+        loading = cts;
+        if (front is null)
+            Status = "Loading...";
+        var cell = snapshotCell;
+
+        Task.Run(async () =>
+        {
+            var watch = Stopwatch.StartNew();
+            var traced = Traced(map, colour, cts.Token);
+
+            cts.Token.ThrowIfCancellationRequested();
+            var shown = cells.Length > 0 ? MapStylizer.Fuse(traced, map, cells, cell, colour) : traced;
+            cts.Token.ThrowIfCancellationRequested();
+
+            var texture = await Plugin.TextureProvider.CreateFromRawAsync(
+                RawImageSpecification.Rgba32(shown.Size, shown.Size), shown.Rgba, $"MoogleMap {map.Key}", cts.Token);
+
+            return new Result(map, texture, shown, cells.Length, watch.ElapsedMilliseconds);
+        }, cts.Token).ContinueWith(task =>
+        {
+            if (ReferenceEquals(loading, cts))
+                loading = null;
+
+            if (task.IsCanceled || cts.IsCancellationRequested)
+            {
+                if (task.IsCompletedSuccessfully)
+                    task.Result.Texture.Dispose();
+                return;
+            }
+
+            if (task.Exception is { } ex)
+            {
+                Status = "Couldn't load this map";
+                Plugin.Log.Error(ex.GetBaseException(), "Failed to load map {Key}", map.Key);
+                return;
+            }
+
+            lock (gate)
+            {
+                pending?.Texture.Dispose();
+                pending = task.Result;
+            }
+
+            Prefetch(map, colour);
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>The map traced from its picture, from memory when it's been seen before.</summary>
+    private StylizedMap Traced(MapInfo map, Vector4 colour, CancellationToken token)
+    {
+        var key = (map.RowId, colour);
+        lock (gate)
+        {
+            for (var node = cache.First; node is not null; node = node.Next)
+            {
+                if (node.Value.Key != key) continue;
+                cache.Remove(node);
+                cache.AddLast(node);
+                return node.Value.Map;
+            }
+        }
+
+        var file = Plugin.DataManager.GetFile<TexFile>(map.TexturePath)
+                   ?? throw new InvalidOperationException($"Map texture {map.TexturePath} not found");
+        var buffer = file.TextureBuffer.Filter(0, 0, TexFile.TextureFormat.B8G8R8A8);
+        token.ThrowIfCancellationRequested();
+        var traced = MapStylizer.Run(buffer.RawData, buffer.Width, colour, map.IsOpenWorld);
+
+        lock (gate)
+        {
+            if (cache.All(entry => entry.Key != key))
+            {
+                cache.AddLast((key, traced));
+                while (cache.Count > CacheSize)
+                    cache.RemoveFirst();
+            }
+        }
+
+        return traced;
+    }
+
+    /// <summary>Prepares the other maps of the same territory in the background, one at a time.</summary>
+    private void Prefetch(MapInfo loaded, Vector4 colour)
+    {
+        if (prefetching is not null) return;
+
+        var siblings = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Map>()
+            .Where(row => row.TerritoryType.RowId == loaded.TerritoryId && row.RowId != loaded.RowId)
+            .Select(row => new MapInfo(row))
+            .Where(map => map.HasTexture)
+            .Take(CacheSize - 1)
+            .ToList();
+        if (siblings.Count == 0) return;
+
+        var cts = new CancellationTokenSource();
+        prefetching = cts;
+        Task.Run(() =>
+        {
+            foreach (var map in siblings)
+            {
+                if (cts.IsCancellationRequested) return;
+                try
+                {
+                    Traced(map, colour, cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.Debug(ex, "Couldn't prepare map {Key}", map.Key);
+                }
+            }
+
+            if (logEvents)
+                Plugin.Log.Debug("Prepared {Count} more maps of territory {Territory}", siblings.Count, loaded.TerritoryId);
+        }, cts.Token);
+    }
+
+    private static float Ease(double t)
+    {
+        var x = (float)Math.Clamp(t, 0, 1);
+        return x * x * (3f - 2f * x);
+    }
+
+    /// <summary>Called on logout: drop everything tied to the old map.</summary>
+    public void Reset()
+    {
+        loading?.Cancel();
+        loading = null;
+        prefetching?.Cancel();
+        prefetching = null;
+        if (front is not null) retired.Add(front.Texture);
+        foreach (var (layer, _) in fading) retired.Add(layer.Texture);
+        front = null;
+        fading.Clear();
+        visible.Clear();
+        FusedCells = 0;
+        Current = null;
+        Markers.Load(null);
+        Status = "No map yet";
+    }
+
+    public void Dispose()
+    {
+        loading?.Cancel();
+        prefetching?.Cancel();
+        front?.Texture.Dispose();
+        foreach (var (layer, _) in fading) layer.Texture.Dispose();
+        foreach (var old in retired) old.Dispose();
+        retired.Clear();
+        lock (gate)
+        {
+            pending?.Texture.Dispose();
+            pending = null;
+            cache.Clear();
+        }
+    }
+}

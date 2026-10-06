@@ -1,0 +1,21 @@
+{
+  "Author": "GitHixy",
+  "Name": "MoogleMap",
+  "Punchline": "A see-through map over your screen, one key away. Kupo!",
+  "InternalName": "MoogleMap",
+  "Description": "MoogleMap lays a transparent map right over the game, the way action RPGs do: press a key and the layout around you appears on top of the world, with you in the middle, turning with your camera.\n\nWHAT YOU GET\n\n- The game's own maps, redrawn as a clean outline of walkable floor in dungeons, trials and alliance raids, or as the painted map with its paper background lifted away in towns and fields.\n- Where there is no map to draw from, like deep dungeon floors, the layout fills in around you as you explore.\n- Party members, other players, enemies (with the ones fighting you highlighted), NPCs, treasure coffers, aetherytes and gathering points, live.\n- Map icons, place names, quest markers, your flag and running FATEs, with the game's own icons.\n- Toggle or hold a key of your choice, zoom keys, and a smooth fade in and out.\n- Size, zoom, opacity, colours, rotation and every layer can be tuned.\n\nGETTING STARTED\n\nType /mooglemap (or /mmap) to open the settings and pick your key. /mmap toggle shows or hides the map, handy for a macro.\nFound a bug or have an idea? Settings > Diagnostics copies a report, or come and talk about it on Discord: https://discord.gg/9kjUjWDBkJ\n\nPLAYS BY THE RULES\n\nMoogleMap is purely visual. It only shows what the game already lets you see: hidden objects stay hidden, and it switches itself off in PvP. It never moves your character or sends anything to the game. Settings are stored locally and nothing is ever uploaded.",
+  "ApplicableVersion": "any",
+  "LoadPriority": 0,
+  "CanUnloadAsync": false,
+  "RepoUrl": "https://github.com/GitHixy/MoogleMap",
+  "Tags": [
+    "map",
+    "minimap",
+    "overlay",
+    "dungeon",
+    "deep dungeon",
+    "raid",
+    "radar",
+    "ui"
+  ]
+}
