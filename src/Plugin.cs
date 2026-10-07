@@ -137,6 +137,7 @@ public sealed class Plugin : IDalamudPlugin
             Condition.ConditionChange -= OnConditionChange;
 
             SaveExplored();
+            Explorer.FinishSaving(TimeSpan.FromSeconds(5));
             GameMinimap.SetHidden(false);
             ServerBar?.Dispose();
             ConfigWindow?.Dispose();

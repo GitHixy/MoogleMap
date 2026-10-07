@@ -373,10 +373,22 @@ public sealed class MapOverlay : IDisposable
         }
     }
 
+    /// <summary>Icons the game doesn't have, so they aren't looked up every frame.</summary>
+    private static readonly HashSet<uint> MissingIcons = [];
+
     private static void DrawIcon(ImDrawListPtr dl, uint icon, Vector2 at, float size, float alpha)
     {
-        if (icon == 0) return;
-        var wrap = Plugin.TextureProvider.GetFromGameIcon(new GameIconLookup(icon)).GetWrapOrEmpty();
+        if (icon == 0 || MissingIcons.Contains(icon)) return;
+
+        // Some markers name icons the game doesn't ship; asking for one again every frame would
+        // only fail again.
+        if (!Plugin.TextureProvider.TryGetFromGameIcon(new GameIconLookup(icon), out var texture))
+        {
+            MissingIcons.Add(icon);
+            Plugin.Log.Debug("Icon {Icon} not found; markers using it are drawn without it", icon);
+            return;
+        }
+        var wrap = texture.GetWrapOrEmpty();
         var half = new Vector2(size * 0.5f);
         dl.AddImage(wrap.Handle, at - half, at + half, Vector2.Zero, Vector2.One, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, alpha)));
     }

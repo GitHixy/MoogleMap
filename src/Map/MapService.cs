@@ -124,7 +124,7 @@ public sealed class MapService : IDisposable
         }
     }
 
-    private ((int X, int Z)[] Cells, CellSide[] Sides) Cells(Explorer? survey)
+    private (long[] Cells, CellSide[] Sides) Cells(Explorer? survey)
     {
         if (survey is null) return ([], []);
         fusedRevision = survey.Revision;
@@ -242,7 +242,7 @@ public sealed class MapService : IDisposable
             Plugin.Log.Debug("Map changed to {Id} ({Key}) {Name}", mapId, Current?.Key ?? "-", Current?.DisplayName ?? "-");
     }
 
-    private void Load(MapInfo map, Vector4 colour, ((int X, int Z)[] Cells, CellSide[] Sides) explored)
+    private void Load(MapInfo map, Vector4 colour, (long[] Cells, CellSide[] Sides) explored)
     {
         var (cells, sides) = explored;
         loading?.Cancel();

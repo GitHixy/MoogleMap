@@ -79,9 +79,9 @@ public static class MapStylizer
     /// from the union. Always pass the map as it came from <see cref="Run"/> with every cell found
     /// so far, not a previous fusion.
     /// </summary>
-    /// <param name="cells">Walkable cells in world space, <paramref name="cell"/> yalms square.</param>
+    /// <param name="cells">Walkable cells as explorer keys (see <see cref="Explorer.Unpack"/>), <paramref name="cell"/> yalms square.</param>
     /// <param name="sides">Blocked sides between walkable cells: walls too thin to leave a gap in them.</param>
-    public static StylizedMap Fuse(StylizedMap source, MapInfo map, IReadOnlyList<(int X, int Z)> cells,
+    public static StylizedMap Fuse(StylizedMap source, MapInfo map, IReadOnlyList<long> cells,
         IReadOnlyList<CellSide> sides, float cell, Vector4 colour)
     {
         var n = source.Size;
@@ -90,8 +90,9 @@ public static class MapStylizer
 
         var footprint = source.Footprint;
         var added = 0;
-        foreach (var (cx, cz) in cells)
+        foreach (var key in cells)
         {
+            var (cx, cz) = Explorer.Unpack(key);
             // Cover the whole cell, however many processed pixels it spans at this map's scale.
             var a = map.WorldToTexture(new Vector3(cx * cell, 0f, cz * cell)) * toProcessed;
             var b = map.WorldToTexture(new Vector3((cx + 1) * cell, 0f, (cz + 1) * cell)) * toProcessed;

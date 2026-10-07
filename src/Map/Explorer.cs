@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Numerics;
+using System.Threading.Tasks;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 
 namespace MoogleMap.Map;
@@ -88,6 +89,10 @@ public sealed class Explorer
     private readonly Dictionary<long, Sides> sides = new();
     /// <summary>Floor cells whose sides with their floor neighbours still need testing.</summary>
     private readonly Queue<long> sidesToTest = new();
+    /// <summary>Every blocked side found, kept as a list so drawing doesn't have to look through every side.</summary>
+    private readonly List<CellSide> blockedSides = [];
+    /// <summary>The save being written in the background, if any; saves queue up behind it.</summary>
+    private Task saving = Task.CompletedTask;
     /// <summary>Seeds that found no ground (someone flying, jumping or on a mount), not worth casting for again.</summary>
     private readonly HashSet<(long Cell, int Level)> barrenSeeds = [];
     private readonly List<Pending> frontier = [];
@@ -121,6 +126,7 @@ public sealed class Explorer
         tried.Clear();
         sides.Clear();
         sidesToTest.Clear();
+        blockedSides.Clear();
         barrenSeeds.Clear();
         frontier.Clear();
         cursor = 0;
@@ -137,6 +143,9 @@ public sealed class Explorer
         Clear();
         Territory = territory;
         Cell = cell;
+
+        // A save of this same area may still be on its way to disk; read what it wrote, not before.
+        FinishSaving(TimeSpan.FromSeconds(5));
         if (file is not null && File.Exists(file))
             Load(file);
     }
@@ -386,6 +395,8 @@ public sealed class Explorer
         if (blocked)
         {
             now |= east ? Sides.EastBlocked : Sides.SouthBlocked;
+            var (x, z) = Unpack(key);
+            blockedSides.Add(new CellSide(x, z, east));
             Revision++;
         }
         sides[key] = now;
@@ -484,67 +495,94 @@ public sealed class Explorer
             yield return Unpack(key);
     }
 
-    /// <summary>A copy of the walkable cells, safe to hand to a worker thread.</summary>
-    public (int X, int Z)[] Snapshot()
+    /// <summary>
+    /// A copy of the walkable cells as packed keys (see <see cref="Unpack"/>), safe to hand to a
+    /// worker thread. A plain bulk copy: with a million cells it still takes a few milliseconds,
+    /// where unpacking them here would stall the game.
+    /// </summary>
+    public long[] Snapshot()
     {
-        var result = new (int X, int Z)[cells.Count];
-        var i = 0;
-        foreach (var key in cells.Keys)
-            result[i++] = Unpack(key);
+        var result = new long[cells.Count];
+        cells.Keys.CopyTo(result, 0);
         return result;
     }
 
     /// <summary>
-    /// Blocked sides between two floor cells: walls too thin to leave a gap in the floor. Each is
-    /// the east or south side of the cell given.
+    /// Blocked sides between cells: walls too thin to leave a gap in the floor. Each is the east
+    /// or south side of the cell given. Sides whose cells aren't both floor are for the drawing to
+    /// skip, against the floor it actually draws.
     /// </summary>
-    public CellSide[] Walls()
-    {
-        var result = new List<CellSide>();
-        foreach (var (key, known) in sides)
-        {
-            if ((known & (Sides.EastBlocked | Sides.SouthBlocked)) == 0 || !cells.ContainsKey(key)) continue;
-            var (x, z) = Unpack(key);
-            if ((known & Sides.EastBlocked) != 0 && cells.ContainsKey(Key(x + 1, z)))
-                result.Add(new CellSide(x, z, East: true));
-            if ((known & Sides.SouthBlocked) != 0 && cells.ContainsKey(Key(x, z + 1)))
-                result.Add(new CellSide(x, z, East: false));
-        }
-        return result.ToArray();
-    }
+    public CellSide[] Walls() => blockedSides.ToArray();
 
     // ------------------------------------------------------------------
     // Saving
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Saves what's been found. The data is copied here in bulk and written to disk in the
+    /// background, so a big area doesn't stall the game while the file is written. Level arrays are
+    /// never changed once stored (a new level makes a new array), so sharing them is safe.
+    /// </summary>
     public void Save(string file)
+    {
+        var cellCopy = new KeyValuePair<long, float[]>[cells.Count];
+        ((ICollection<KeyValuePair<long, float[]>>)cells).CopyTo(cellCopy, 0);
+        var sideCopy = new KeyValuePair<long, Sides>[sides.Count];
+        ((ICollection<KeyValuePair<long, Sides>>)sides).CopyTo(sideCopy, 0);
+        var territory = Territory;
+        var cell = Cell;
+        Dirty = false;
+
+        saving = saving.ContinueWith(_ => Write(file, territory, cell, cellCopy, sideCopy), TaskScheduler.Default);
+    }
+
+    /// <summary>Waits for a save still being written, for when the plugin unloads.</summary>
+    public void FinishSaving(TimeSpan timeout)
+    {
+        try
+        {
+            saving.Wait(timeout);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning(ex, "Couldn't finish saving explored floor");
+        }
+    }
+
+    private static void Write(string file, uint territory, float cell, KeyValuePair<long, float[]>[] cellCopy, KeyValuePair<long, Sides>[] sideCopy)
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            using var stream = File.Create(file);
-            using var writer = new BinaryWriter(stream);
-            writer.Write(FileMagic);
-            writer.Write(FileVersion);
-            writer.Write(Territory);
-            writer.Write(Cell);
-            writer.Write(cells.Count);
-            foreach (var (key, levels) in cells)
+
+            // Written next to the file and swapped in, so a crash mid-write never leaves half a file.
+            var temp = file + ".tmp";
+            using (var stream = new BufferedStream(File.Create(temp), 1 << 16))
+            using (var writer = new BinaryWriter(stream))
             {
-                writer.Write(key);
-                writer.Write((byte)Math.Min(levels.Length, 255));
-                for (var i = 0; i < Math.Min(levels.Length, 255); i++)
-                    writer.Write(levels[i]);
+                writer.Write(FileMagic);
+                writer.Write(FileVersion);
+                writer.Write(territory);
+                writer.Write(cell);
+                writer.Write(cellCopy.Length);
+                foreach (var (key, levels) in cellCopy)
+                {
+                    writer.Write(key);
+                    var count = Math.Min(levels.Length, 255);
+                    writer.Write((byte)count);
+                    for (var i = 0; i < count; i++)
+                        writer.Write(levels[i]);
+                }
+
+                writer.Write(sideCopy.Length);
+                foreach (var (key, known) in sideCopy)
+                {
+                    writer.Write(key);
+                    writer.Write((byte)known);
+                }
             }
 
-            writer.Write(sides.Count);
-            foreach (var (key, known) in sides)
-            {
-                writer.Write(key);
-                writer.Write((byte)known);
-            }
-
-            Dirty = false;
+            File.Move(temp, file, overwrite: true);
         }
         catch (Exception ex)
         {
@@ -586,7 +624,13 @@ public sealed class Explorer
                 for (var i = 0; i < sideCount; i++)
                 {
                     var key = reader.ReadInt64();
-                    sides[key] = (Sides)reader.ReadByte();
+                    var known = (Sides)reader.ReadByte();
+                    sides[key] = known;
+                    var (x, z) = Unpack(key);
+                    if ((known & Sides.EastBlocked) != 0)
+                        blockedSides.Add(new CellSide(x, z, East: true));
+                    if ((known & Sides.SouthBlocked) != 0)
+                        blockedSides.Add(new CellSide(x, z, East: false));
                 }
             }
 
@@ -613,6 +657,7 @@ public sealed class Explorer
             cells.Clear();
             sides.Clear();
             sidesToTest.Clear();
+            blockedSides.Clear();
         }
     }
 
@@ -620,7 +665,7 @@ public sealed class Explorer
 
     private static long Key(int x, int z) => (long)x << 32 | (uint)z;
 
-    private static (int X, int Z) Unpack(long key) => ((int)(key >> 32), (int)(key & 0xFFFFFFFF));
+    public static (int X, int Z) Unpack(long key) => ((int)(key >> 32), (int)(key & 0xFFFFFFFF));
 }
 
 /// <summary>A blocked east (or south) side of explorer cell X, Z.</summary>
