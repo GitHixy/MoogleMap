@@ -5,6 +5,7 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Fates;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using MoogleMap.Models;
 
@@ -264,23 +265,76 @@ public sealed class LiveMarkers
         return native is null ? 0 : native->NamePlateIconId;
     }
 
-    /// <summary>Quest names by objective id, read once from the Quest sheet.</summary>
-    private static readonly Dictionary<uint, string?> QuestNames = new();
+    /// <summary>The steps of one accepted quest or leve, all named after it.</summary>
+    private void AddObjectives(in MarkerInfo info, MapInfo map, int start, bool leve)
+    {
+        if (info.ObjectiveId == 0 || !info.ShouldRender) return;
+        var name = leve ? LeveName(info.ObjectiveId) : QuestName(info.ObjectiveId);
+        foreach (var data in info.MarkerData)
+            AddObjective(data, map, start, name);
+    }
 
     /// <summary>
-    /// A quest's name from the id the map agent gives its markers. Quest rows start at 65536,
-    /// and the id may come with or without that offset. Leves and other objectives have no name here.
+    /// Adds one objective on this map, unless the same one is already there: a quest step can be
+    /// in both the quest list and the event markers.
     /// </summary>
-    private static string? QuestName(uint objective)
+    private void AddObjective(in MapMarkerData data, MapInfo map, int start, string? name)
     {
-        if (objective == 0) return null;
-        if (QuestNames.TryGetValue(objective, out var known)) return known;
+        if (data.MapId != map.RowId || data.IconId == 0) return;
 
-        var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Quest>();
-        var row = sheet.GetRowOrDefault(objective) ?? (objective < 0x10000 ? sheet.GetRowOrDefault(objective + 0x10000) : null);
+        for (var i = start; i < building.Count; i++)
+        {
+            var known = building[i];
+            if (known.Icon == data.IconId && Vector3.DistanceSquared(known.Position, data.Position) < 1f)
+                return;
+        }
+
+        building.Add(new LiveMarker
+        {
+            Kind = MarkerKind.Quest,
+            Position = data.Position,
+            Radius = data.Radius,
+            Icon = data.IconId,
+            Name = name,
+        });
+    }
+
+    /// <summary>
+    /// The name for an event marker. Their ids aren't only quests (FATEs, leves and events use
+    /// their own numbering), so one is only named when it's a quest the player has accepted;
+    /// anything else is left unnamed rather than given some unrelated quest's name.
+    /// </summary>
+    private static unsafe string? EventName(uint objective)
+    {
+        var id = objective >= 0x10000 ? objective - 0x10000 : objective;
+        if (id == 0 || id > ushort.MaxValue) return null;
+        var quests = FFXIVClientStructs.FFXIV.Client.Game.QuestManager.Instance();
+        return quests is not null && quests->IsQuestAccepted((ushort)id) ? QuestName(objective) : null;
+    }
+
+    /// <summary>Quest names by id, read once from the Quest sheet.</summary>
+    private static readonly Dictionary<uint, string?> QuestNames = new();
+    /// <summary>Leve names by id, read once from the Leve sheet.</summary>
+    private static readonly Dictionary<uint, string?> LeveNames = new();
+
+    /// <summary>A quest's name. Quest rows start at 65536, and the id may come with or without that offset.</summary>
+    private static string? QuestName(uint quest)
+    {
+        if (quest == 0) return null;
+        if (QuestNames.TryGetValue(quest, out var known)) return known;
+
+        var row = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Quest>().GetRowOrDefault(quest < 0x10000 ? quest + 0x10000 : quest);
         var name = row?.Name.ToString();
-        QuestNames[objective] = string.IsNullOrWhiteSpace(name) ? null : name;
-        return QuestNames[objective];
+        return QuestNames[quest] = string.IsNullOrWhiteSpace(name) ? null : name;
+    }
+
+    private static string? LeveName(uint leve)
+    {
+        if (leve == 0) return null;
+        if (LeveNames.TryGetValue(leve, out var known)) return known;
+
+        var name = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Leve>().GetRowOrDefault(leve)?.Name.ToString();
+        return LeveNames[leve] = string.IsNullOrWhiteSpace(name) ? null : name;
     }
 
     /// <summary>Adds the role, job abbreviation and health of a party member.</summary>
@@ -456,30 +510,40 @@ public sealed class LiveMarkers
     private static bool Loading()
         => Plugin.Condition[ConditionFlag.BetweenAreas] || Plugin.Condition[ConditionFlag.BetweenAreas51];
 
-    /// <summary>Quest objectives and the flag come from the game's own map agent.</summary>
+    /// <summary>
+    /// Quest objectives and the flag. Objectives come from two places: the map agent's event
+    /// markers (single spots, FATEs, events), and the game's list of accepted quests, which also
+    /// holds the areas to hunt or gather in. Leves are kept alongside quests and come the same way.
+    /// </summary>
     private unsafe void AddAgentMarkers(Configuration config, MapInfo map)
     {
         var agent = AgentMap.Instance();
-        if (agent is null || agent->CurrentMapId != map.RowId) return;
+        if (agent is null) return;
 
         if (config.ShowQuestMarkers)
         {
+            var start = building.Count;
+
+            // The quest list first: it knows which quest each step belongs to, so where a step is
+            // in both, its name comes from here.
+            var quests = FFXIVClientStructs.FFXIV.Client.Game.UI.Map.Instance();
+            if (quests is not null)
+            {
+                foreach (ref readonly var quest in quests->QuestMarkers)
+                    AddObjectives(quest, map, start, leve: false);
+                foreach (ref readonly var leve in quests->LevequestMarkers)
+                    AddObjectives(leve, map, start, leve: true);
+                AddObjectives(quests->ActiveLevequestMarker, map, start, leve: true);
+            }
+
             // Only plain values are copied out. The tooltip text is a pointer into memory the game
             // frees and reuses as it rebuilds markers, so it's never followed.
-            foreach (var data in agent->EventMarkers)
-            {
-                if (data.MapId != map.RowId || data.IconId == 0) continue;
-
-                building.Add(new LiveMarker
-                {
-                    Kind = MarkerKind.Quest,
-                    Position = data.Position,
-                    Radius = data.Radius,
-                    Icon = data.IconId,
-                    Name = QuestName(data.ObjectiveId),
-                });
-            }
+            if (agent->CurrentMapId == map.RowId)
+                foreach (var data in agent->EventMarkers)
+                    AddObjective(data, map, start, EventName(data.ObjectiveId));
         }
+
+        if (agent->CurrentMapId != map.RowId) return;
 
         if (config.ShowFlag && agent->FlagMarkerCount > 0)
         {

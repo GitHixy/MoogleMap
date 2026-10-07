@@ -774,7 +774,9 @@ public class ConfigWindow : Window
             : $"{plugin.ExplorerMode}: {plugin.Explorer.FloorCells} cells, {plugin.Explorer.FrontierSize} to visit, {plugin.Explorer.Raycasts} raycasts");
         if (plugin.ExplorerMode == ExploreMode.Survey)
             StateRow("On the map", $"{plugin.Maps.FusedCells} explored cells drawn");
-        StateRow("Game windows on top", MoogleMap.Rendering.GameWindows.Covering);
+        StateRow("Game windows on top", MoogleMap.Rendering.GameWindows.GaveUp
+            ? $"{MoogleMap.Rendering.GameWindows.Covering} (too many to cut around: map drawn over them)"
+            : MoogleMap.Rendering.GameWindows.Covering);
         if (Config.IgnoredWindows.Count > 0)
             StateRow("Ignored windows", string.Join(", ", Config.IgnoredWindows));
         StateRow("Maps in memory", plugin.Maps.CachedMaps.ToString());

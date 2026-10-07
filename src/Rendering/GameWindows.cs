@@ -12,13 +12,23 @@ namespace MoogleMap.Rendering;
 /// </summary>
 public static class GameWindows
 {
-    /// <summary>Past this many pieces the screen is too busy to cut up; the map is simply drawn.</summary>
-    private const int MaxPieces = 48;
+    /// <summary>
+    /// Past this many pieces the map would be drawn too many times over; it's drawn whole instead.
+    /// Merging the free cells keeps even a busy screen (crafting, with every bar up) well under it.
+    /// </summary>
+    private const int MaxPieces = 96;
 
     private static readonly List<(Vector2 Min, Vector2 Max)> Blockers = [];
     private static readonly List<(Vector2 Min, Vector2 Max)> Pieces = [];
-    private static readonly List<(Vector2 Min, Vector2 Max)> Next = [];
     private static readonly List<string> Names = [];
+    private static readonly List<float> Xs = [];
+    private static readonly List<float> Ys = [];
+    /// <summary>Free runs reaching down to the row being built, as column spans, with where each started.</summary>
+    private static readonly List<(int First, int Last, float Top)> Open = [];
+    private static readonly List<(int First, int Last, float Top)> Still = [];
+
+    /// <summary>Whether the map was left uncut on the last frame because the screen was too busy.</summary>
+    public static bool GaveUp { get; private set; }
 
     /// <summary>Game windows the map was kept clear of on the last frame, for the Diagnostics page.</summary>
     public static string Covering => Names.Count == 0 ? "none" : string.Join(", ", Names);
@@ -33,6 +43,7 @@ public static class GameWindows
     {
         Blockers.Clear();
         Names.Clear();
+        GaveUp = false;
 
         var manager = RaptureAtkUnitManager.Instance();
         if (manager is null) return null;
@@ -67,20 +78,92 @@ public static class GameWindows
 
         if (Blockers.Count == 0) return null;
 
-        Pieces.Clear();
-        Pieces.Add((areaMin, areaMax));
-        foreach (var (bMin, bMax) in Blockers)
+        Cut(areaMin, areaMax);
+        if (Pieces.Count > MaxPieces)
         {
-            Next.Clear();
-            foreach (var piece in Pieces)
-                Subtract(piece, bMin, bMax, Next);
+            GaveUp = true;
+            return null;
+        }
+        return Pieces;
+    }
 
-            Pieces.Clear();
-            Pieces.AddRange(Next);
-            if (Pieces.Count > MaxPieces) return null;
+    /// <summary>
+    /// Cuts the area into the rectangles no blocker covers. Every blocker edge becomes a grid
+    /// line; free cells are joined into runs along each row, and a run carries on down while the
+    /// rows below have the same one, so overlapping and touching windows don't multiply pieces.
+    /// </summary>
+    private static void Cut(Vector2 areaMin, Vector2 areaMax)
+    {
+        Lines(Xs, areaMin.X, areaMax.X, true);
+        Lines(Ys, areaMin.Y, areaMax.Y, false);
+        Pieces.Clear();
+        Open.Clear();
+
+        for (var row = 0; row < Ys.Count - 1; row++)
+        {
+            var top = Ys[row];
+            var bottom = Ys[row + 1];
+            var mid = (top + bottom) * 0.5f;
+
+            Still.Clear();
+            var first = -1;
+            for (var col = 0; col <= Xs.Count - 1; col++)
+            {
+                var free = col < Xs.Count - 1 && !Covered((Xs[col] + Xs[col + 1]) * 0.5f, mid);
+                if (free && first < 0) first = col;
+                if (free || first < 0) continue;
+
+                // A run ends: continue the one above it if it spans the same columns.
+                var last = col - 1;
+                var start = top;
+                var above = Open.FindIndex(r => r.First == first && r.Last == last);
+                if (above >= 0)
+                {
+                    start = Open[above].Top;
+                    Open.RemoveAt(above);
+                }
+                Still.Add((first, last, start));
+                first = -1;
+            }
+
+            // Runs above that didn't carry on end at this row's top.
+            foreach (var (f, l, t) in Open)
+                Pieces.Add((new Vector2(Xs[f], t), new Vector2(Xs[l + 1], top)));
+            Open.Clear();
+            Open.AddRange(Still);
         }
 
-        return Pieces;
+        foreach (var (f, l, t) in Open)
+            Pieces.Add((new Vector2(Xs[f], t), new Vector2(Xs[l + 1], Ys[^1])));
+    }
+
+    /// <summary>The area's edges and every blocker edge inside it, sorted, along one axis.</summary>
+    private static void Lines(List<float> into, float min, float max, bool x)
+    {
+        into.Clear();
+        into.Add(min);
+        into.Add(max);
+        foreach (var (bMin, bMax) in Blockers)
+        {
+            var a = x ? bMin.X : bMin.Y;
+            var b = x ? bMax.X : bMax.Y;
+            if (a > min && a < max) into.Add(a);
+            if (b > min && b < max) into.Add(b);
+        }
+        into.Sort();
+
+        // Lines closer than a pixel make slivers of cells; keep one.
+        for (var i = into.Count - 1; i > 0; i--)
+            if (into[i] - into[i - 1] < 1f)
+                into.RemoveAt(i == into.Count - 1 ? i - 1 : i);
+    }
+
+    private static bool Covered(float x, float y)
+    {
+        foreach (var (bMin, bMax) in Blockers)
+            if (x >= bMin.X && x < bMax.X && y >= bMin.Y && y < bMax.Y)
+                return true;
+        return false;
     }
 
     /// <summary>
@@ -123,24 +206,4 @@ public static class GameWindows
 
     /// <summary>Names of the windows the map was kept clear of on the last frame.</summary>
     public static IReadOnlyList<string> CoveringNames => Names;
-
-    /// <summary>Adds what's left of <paramref name="piece"/> outside the blocker, as up to four rectangles.</summary>
-    private static void Subtract((Vector2 Min, Vector2 Max) piece, Vector2 bMin, Vector2 bMax, List<(Vector2 Min, Vector2 Max)> into)
-    {
-        var (min, max) = piece;
-        if (bMax.X <= min.X || bMin.X >= max.X || bMax.Y <= min.Y || bMin.Y >= max.Y)
-        {
-            into.Add(piece);
-            return;
-        }
-
-        // Bands above and below span the full width; left and right fill in between.
-        if (bMin.Y > min.Y) into.Add((min, new Vector2(max.X, bMin.Y)));
-        if (bMax.Y < max.Y) into.Add((new Vector2(min.X, bMax.Y), max));
-
-        var top = Math.Max(min.Y, bMin.Y);
-        var bottom = Math.Min(max.Y, bMax.Y);
-        if (bMin.X > min.X) into.Add((new Vector2(min.X, top), new Vector2(bMin.X, bottom)));
-        if (bMax.X < max.X) into.Add((new Vector2(bMax.X, top), new Vector2(max.X, bottom)));
-    }
 }
