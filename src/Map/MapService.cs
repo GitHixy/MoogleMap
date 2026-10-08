@@ -79,6 +79,8 @@ public sealed class MapService : IDisposable
 
     /// <summary>Longest side of the floor on screen, in yalms, or null when there's none yet.</summary>
     public float? AreaSize { get; private set; }
+    /// <summary>Middle of the floor on screen, by world X/Z, or null when there's none yet.</summary>
+    public Vector2? AreaCenter { get; private set; }
     /// <summary>Explored cells in the texture on screen.</summary>
     public int FusedCells { get; private set; }
     public int CachedMaps
@@ -191,7 +193,9 @@ public sealed class MapService : IDisposable
 
         FromPicture = done.Shown.FromPicture;
         Bounds = done.Shown is { FromPicture: true, Footprint: { } area } ? Inside(done.Map, area, done.Shown.Size) : null;
-        AreaSize = Extent(done.Shown.Walls, done.Map);
+        var extent = Extent(done.Shown.Walls, done.Map);
+        AreaSize = extent?.Size;
+        AreaCenter = extent?.Center;
         PaperShare = done.Shown.PaperShare;
         FloorShare = done.Shown.FloorShare;
         FusedCells = done.Cells;
@@ -221,6 +225,7 @@ public sealed class MapService : IDisposable
         FusedCells = 0;
         Current = null;
         AreaSize = null;
+        AreaCenter = null;
         Bounds = null;
 
         if (mapId != 0 && Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.Map>().GetRowOrDefault(mapId) is { } row)
@@ -379,7 +384,7 @@ public sealed class MapService : IDisposable
         };
     }
 
-    private static float? Extent(IReadOnlyList<WallLine> walls, MapInfo map)
+    private static (float Size, Vector2 Center)? Extent(IReadOnlyList<WallLine> walls, MapInfo map)
     {
         if (walls.Count == 0) return null;
         var min = new Vector2(float.MaxValue);
@@ -391,7 +396,7 @@ public sealed class MapService : IDisposable
         }
 
         var size = max - min;
-        return Math.Max(size.X, size.Y) / map.Scale;
+        return (Math.Max(size.X, size.Y) / map.Scale, map.TextureToWorld((min + max) * 0.5f));
     }
 
     private static float Ease(double t)
@@ -504,6 +509,7 @@ public sealed class MapService : IDisposable
         FusedCells = 0;
         Current = null;
         AreaSize = null;
+        AreaCenter = null;
         Bounds = null;
         Markers.Load(null);
         Status = "No map yet";

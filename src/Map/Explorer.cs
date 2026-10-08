@@ -79,26 +79,34 @@ public sealed class Explorer
     }
 
     /// <summary>Floor heights found in each cell, one per level.</summary>
-    private readonly Dictionary<long, float[]> cells = new();
+    private Dictionary<long, float[]> cells = new(CellKeys.Instance);
     /// <summary>
     /// Steps already tried, by target cell, the level they came from and the side they came in by,
     /// so none is cast twice. A cell blocked from one side is still tried from the others.
     /// </summary>
-    private readonly HashSet<(long Cell, int Level, int From)> tried = [];
+    private readonly HashSet<(long Cell, int Level, int From)> tried = new(CellKeys.Instance);
     /// <summary>What's known about the sides between cells, by the cell west or north of each.</summary>
-    private readonly Dictionary<long, Sides> sides = new();
+    private Dictionary<long, Sides> sides = new(CellKeys.Instance);
     /// <summary>Floor cells whose sides with their floor neighbours still need testing.</summary>
-    private readonly Queue<long> sidesToTest = new();
+    private Queue<long> sidesToTest = new();
     /// <summary>Every blocked side found, kept as a list so drawing doesn't have to look through every side.</summary>
-    private readonly List<CellSide> blockedSides = [];
+    private List<CellSide> blockedSides = [];
     /// <summary>The save being written in the background, if any; saves queue up behind it.</summary>
     private Task saving = Task.CompletedTask;
     /// <summary>Seeds that found no ground (someone flying, jumping or on a mount), not worth casting for again.</summary>
-    private readonly HashSet<(long Cell, int Level)> barrenSeeds = [];
-    private readonly List<Pending> frontier = [];
+    private readonly HashSet<(long Cell, int Level)> barrenSeeds = new(CellKeys.Instance);
+    private List<Pending> frontier = [];
+    /// <summary>
+    /// What was saved for this territory, being read in the background: a big area takes a second
+    /// or more, too long to stall the game for. Exploring waits until it's in.
+    /// </summary>
+    private Task<Loaded?>? loading;
     private readonly Stopwatch watch = new();
     private int cursor;
     private bool warnedBarren;
+
+    /// <summary>Where the time goes, part by part, for the Diagnostics page.</summary>
+    public Services.FrameTimes? Times { get; set; }
 
     /// <summary>Where the search may go, by world X/Z, or null for anywhere. Seeds are always taken.</summary>
     public Func<float, float, bool>? Bounds { get; set; }
@@ -129,10 +137,12 @@ public sealed class Explorer
         blockedSides.Clear();
         barrenSeeds.Clear();
         frontier.Clear();
+        loading = null;
         cursor = 0;
         warnedBarren = false;
         Progress = 1f;
         progressAt = 0;
+        progressScan = null;
         Dirty = false;
         Revision++;
     }
@@ -144,10 +154,43 @@ public sealed class Explorer
         Territory = territory;
         Cell = cell;
 
+        if (file is null || !File.Exists(file)) return;
+
         // A save of this same area may still be on its way to disk; read what it wrote, not before.
-        FinishSaving(TimeSpan.FromSeconds(5));
-        if (file is not null && File.Exists(file))
-            Load(file);
+        var previous = saving;
+        loading = Task.Run(() =>
+        {
+            try
+            {
+                previous.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.Warning(ex, "Couldn't finish saving explored floor");
+            }
+            return Load(file, territory, cell);
+        });
+    }
+
+    /// <summary>Takes in what was read in the background, once it's ready. False while it's still being read.</summary>
+    private bool FinishLoading()
+    {
+        if (loading is null) return true;
+        if (!loading.IsCompleted) return false;
+
+        var loaded = loading.IsCompletedSuccessfully ? loading.Result : null;
+        loading = null;
+        if (loaded is null) return true;
+
+        cells = loaded.Cells;
+        sides = loaded.Sides;
+        blockedSides = loaded.BlockedSides;
+        sidesToTest = loaded.SidesToTest;
+        frontier = loaded.Frontier;
+        cursor = 0;
+        Revision++;
+        Plugin.Log.Debug("Loaded {Count} explored cells for territory {Territory}", cells.Count, Territory);
+        return true;
     }
 
     /// <summary>
@@ -156,7 +199,10 @@ public sealed class Explorer
     /// </summary>
     public void Update(Vector3 player, IReadOnlyList<Vector3> seeds, float reach, double budgetMs)
     {
+        if (!FinishLoading()) return;
+
         watch.Restart();
+        var start = Services.FrameTimes.Start();
 
         if (!Seed(player, remember: false))
             SeedBelow(player);
@@ -171,6 +217,8 @@ public sealed class Explorer
             if (watch.Elapsed.TotalMilliseconds > budgetMs * 0.3) break;
             Seed(seed);
         }
+        Times?.Add("explorer seeds", start);
+        start = Services.FrameTimes.Start();
 
         var reachSq = reach * reach;
         var scanned = 0;
@@ -196,18 +244,38 @@ public sealed class Explorer
             frontier.RemoveAt(frontier.Count - 1);
             Expand(p);
         }
+        Times?.Add("explorer search", start);
+        start = Services.FrameTimes.Start();
 
         // Spare time goes to the sides between known floor, where thin walls hide.
         while (sidesToTest.Count > 0 && watch.Elapsed.TotalMilliseconds < budgetMs)
             TestSides(sidesToTest.Dequeue());
+        Times?.Add("explorer sides", start);
 
         var now = Environment.TickCount64 / 1000.0;
-        if (now >= progressAt)
+        if (progressScan is not null || now >= progressAt)
         {
-            progressAt = now + 0.5;
+            start = Services.FrameTimes.Start();
             UpdateProgress(player, reach);
+            Times?.Add("explorer progress", start);
+            if (progressScan is null)
+                progressAt = now + 0.5;
         }
     }
+
+    /// <summary>A count of the frontier near the player, carried over several frames.</summary>
+    private sealed class ProgressScan
+    {
+        public Vector3 Player;
+        public float ReachSq;
+        public int Found;
+        public int Waiting;
+        public int Index;
+    }
+
+    private ProgressScan? progressScan;
+    /// <summary>Time the progress count may take per frame: the frontier of a big field runs to millions.</summary>
+    private const double ProgressBudgetMs = 0.4;
 
     private void UpdateProgress(Vector3 player, float reach)
     {
@@ -217,6 +285,30 @@ public sealed class Explorer
             return;
         }
 
+        // A count already under way carries on from where the last frame left it, around where the
+        // player was when it began: close enough for a progress bar.
+        var scan = progressScan ??= StartProgress(player, reach);
+        var counted = 0;
+        var started = Stopwatch.GetTimestamp();
+        var cell = Cell;
+        while (scan.Index < frontier.Count)
+        {
+            var p = frontier[scan.Index++];
+            var dx = (p.X + 0.5f) * cell - scan.Player.X;
+            var dz = (p.Z + 0.5f) * cell - scan.Player.Z;
+            if (dx * dx + dz * dz <= scan.ReachSq)
+                scan.Waiting++;
+            if (++counted % 4096 == 0 && Stopwatch.GetElapsedTime(started).TotalMilliseconds > ProgressBudgetMs)
+                return;
+        }
+
+        Progress = scan.Found + scan.Waiting == 0 ? 1f : scan.Found / (float)(scan.Found + scan.Waiting);
+        progressScan = null;
+    }
+
+    /// <summary>Begins a progress count: the floor already found in reach, then the frontier, a frame at a time.</summary>
+    private ProgressScan StartProgress(Vector3 player, float reach)
+    {
         // With a reach, only what's around the player counts: the rest waits for them to go there.
         var reachSq = reach * reach;
         bool Near(int x, int z)
@@ -227,21 +319,19 @@ public sealed class Explorer
         }
 
         // Walk the grid in reach rather than every cell: stays cheap however much has been explored.
+        // A wide reach is sampled every few cells, which is plenty for a progress bar.
         var span = (int)MathF.Ceiling(reach / Cell);
+        var stride = Math.Max(1, span / 40);
         var px = Index(player.X);
         var pz = Index(player.Z);
         var found = 0;
-        for (var z = pz - span; z <= pz + span; z++)
-            for (var x = px - span; x <= px + span; x++)
+        for (var z = pz - span; z <= pz + span; z += stride)
+            for (var x = px - span; x <= px + span; x += stride)
                 if (Near(x, z) && cells.ContainsKey(Key(x, z)))
                     found++;
+        found *= stride * stride;
 
-        var waiting = 0;
-        foreach (var p in frontier)
-            if (Near(p.X, p.Z))
-                waiting++;
-
-        Progress = found + waiting == 0 ? 1f : found / (float)(found + waiting);
+        return new ProgressScan { Player = player, ReachSq = reachSq, Found = found };
     }
 
     /// <summary>
@@ -590,25 +680,35 @@ public sealed class Explorer
         }
     }
 
-    private void Load(string file)
+    /// <summary>Everything read back from a save, ready to be swapped in.</summary>
+    private sealed record Loaded(
+        Dictionary<long, float[]> Cells,
+        Dictionary<long, Sides> Sides,
+        List<CellSide> BlockedSides,
+        Queue<long> SidesToTest,
+        List<Pending> Frontier);
+
+    /// <summary>Reads a save. Touches nothing of the explorer's own, so it can run in the background.</summary>
+    private static Loaded? Load(string file, uint territory, float cellSize)
     {
         try
         {
             using var stream = File.OpenRead(file);
             using var reader = new BinaryReader(stream);
             if (reader.ReadInt32() != FileMagic)
-                return;
+                return null;
             // Older versions have the same floor; their sides (none in 2, tested with a single ray
             // in 3) are tested again.
             var version = reader.ReadInt32();
-            if (version is not (2 or 3 or FileVersion) || reader.ReadUInt32() != Territory)
-                return;
+            if (version is not (2 or 3 or FileVersion) || reader.ReadUInt32() != territory)
+                return null;
 
             // Cells of another size don't line up with this grid; start over rather than mix them.
-            if (MathF.Abs(reader.ReadSingle() - Cell) > 1e-3f)
-                return;
+            if (MathF.Abs(reader.ReadSingle() - cellSize) > 1e-3f)
+                return null;
 
             var count = reader.ReadInt32();
+            var cells = new Dictionary<long, float[]>(count, CellKeys.Instance);
             for (var i = 0; i < count; i++)
             {
                 var key = reader.ReadInt64();
@@ -618,9 +718,12 @@ public sealed class Explorer
                 cells[key] = levels;
             }
 
+            var sides = new Dictionary<long, Sides>(CellKeys.Instance);
+            var blockedSides = new List<CellSide>();
             if (version >= FileVersion)
             {
                 var sideCount = reader.ReadInt32();
+                sides.EnsureCapacity(sideCount);
                 for (var i = 0; i < sideCount; i++)
                 {
                     var key = reader.ReadInt64();
@@ -635,29 +738,34 @@ public sealed class Explorer
             }
 
             // Pick up where it left off: every edge of what's known is worth one more look.
+            var sidesToTest = new Queue<long>(cells.Count);
+            var frontier = new List<Pending>();
             foreach (var (key, levels) in cells)
             {
                 var (x, z) = Unpack(key);
                 sidesToTest.Enqueue(key);
                 foreach (var h in levels)
                 {
-                    Queue(x + 1, z, h, x, z);
-                    Queue(x - 1, z, h, x, z);
-                    Queue(x, z + 1, h, x, z);
-                    Queue(x, z - 1, h, x, z);
+                    Edge(x + 1, z, h, x, z);
+                    Edge(x - 1, z, h, x, z);
+                    Edge(x, z + 1, h, x, z);
+                    Edge(x, z - 1, h, x, z);
                 }
             }
 
-            Revision++;
-            Plugin.Log.Debug("Loaded {Count} explored cells for territory {Territory}", count, Territory);
+            return new Loaded(cells, sides, blockedSides, sidesToTest, frontier);
+
+            // Nothing has been tried yet, so only cells already known on that level are left out.
+            void Edge(int x, int z, float height, int fromX, int fromZ)
+            {
+                if (!(cells.TryGetValue(Key(x, z), out var known) && HasLevel(known, height)))
+                    frontier.Add(new Pending(x, z, height, fromX, fromZ));
+            }
         }
         catch (Exception ex)
         {
             Plugin.Log.Warning(ex, "Couldn't read explored floor from {File}", file);
-            cells.Clear();
-            sides.Clear();
-            sidesToTest.Clear();
-            blockedSides.Clear();
+            return null;
         }
     }
 
@@ -666,6 +774,32 @@ public sealed class Explorer
     private static long Key(int x, int z) => (long)x << 32 | (uint)z;
 
     public static (int X, int Z) Unpack(long key) => ((int)(key >> 32), (int)(key & 0xFFFFFFFF));
+}
+
+/// <summary>
+/// Hashing for cell keys. A key is X and Z packed into a long, and a long's own hash is its two
+/// halves XORed, X ^ Z: every cell along a diagonal lands on the same hash, so a big field's
+/// hundreds of thousands of cells pile into a few thousand buckets and every lookup crawls.
+/// Mixing the bits spreads them out.
+/// </summary>
+internal sealed class CellKeys : IEqualityComparer<long>, IEqualityComparer<(long Cell, int Level)>, IEqualityComparer<(long Cell, int Level, int From)>
+{
+    public static readonly CellKeys Instance = new();
+
+    private static int Mix(long key)
+    {
+        var h = (ulong)key * 0x9E3779B97F4A7C15UL;
+        return (int)(h ^ (h >> 32));
+    }
+
+    public bool Equals(long a, long b) => a == b;
+    public int GetHashCode(long key) => Mix(key);
+
+    public bool Equals((long Cell, int Level) a, (long Cell, int Level) b) => a == b;
+    public int GetHashCode((long Cell, int Level) key) => HashCode.Combine(Mix(key.Cell), key.Level);
+
+    public bool Equals((long Cell, int Level, int From) a, (long Cell, int Level, int From) b) => a == b;
+    public int GetHashCode((long Cell, int Level, int From) key) => HashCode.Combine(Mix(key.Cell), key.Level, key.From);
 }
 
 /// <summary>A blocked east (or south) side of explorer cell X, Z.</summary>

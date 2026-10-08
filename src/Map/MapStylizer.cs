@@ -192,7 +192,7 @@ public static class MapStylizer
     private static List<(bool East, int Line, int At)> DropShort(List<(bool East, int Line, int At)> runs)
     {
         // Each side joins two grid corners; sides sharing a corner belong to the same wall.
-        var parent = new Dictionary<long, long>();
+        var parent = new Dictionary<long, long>(CellKeys.Instance);
         long Find(long v)
         {
             while (parent.TryGetValue(v, out var p) && p != v)
@@ -222,7 +222,7 @@ public static class MapStylizer
             Union(a, b);
         }
 
-        var size = new Dictionary<long, int>();
+        var size = new Dictionary<long, int>(CellKeys.Instance);
         foreach (var side in runs)
         {
             var root = Find(Ends(side).A);

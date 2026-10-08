@@ -71,6 +71,8 @@ public sealed class Plugin : IDalamudPlugin
     public KeyWatcher Keys { get; } = new();
     public ServerBarEntry ServerBar { get; }
     public Trail Trail { get; } = new();
+    /// <summary>How long each part takes per frame, for the Diagnostics page.</summary>
+    public FrameTimes Times { get; } = new();
 
     // Windows
     public ConfigWindow ConfigWindow { get; }
@@ -329,6 +331,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // Open fields get a little more time: there's far more ground to cover.
         var budget = Maps.Current?.IsOpenWorld == true ? 1.5 : 1.0;
+        Explorer.Times = Times;
         Explorer.Bounds = mode == ExploreMode.Survey ? Maps.Bounds : null;
         Explorer.Update(player, Live.Seeds, ExplorerReach(mode), budget);
 
@@ -373,19 +376,38 @@ public sealed class Plugin : IDalamudPlugin
     {
         get
         {
-            var view = View;
-            if (!Configuration.FitSmallAreas || Maps.AreaSize is not { } size || size < 1f)
-                return view.Zoom;
+            var zoom = View.Zoom;
+            return Configuration.FitSmallAreas && FitZoom is { } fit ? Math.Max(zoom, Math.Min(fit, MaxZoom)) : zoom;
+        }
+    }
+
+    /// <summary>
+    /// Where the map is centred, by world X/Z, when the whole place fits on it at the zoom shown;
+    /// null to follow the player.
+    /// </summary>
+    public System.Numerics.Vector2? MapCenter
+        => Configuration.CenterSmallAreas && FitZoom is { } fit && fit >= Zoom * 0.999f ? Maps.AreaCenter : null;
+
+    /// <summary>
+    /// The zoom at which the whole place fills most of the map, or null when its size isn't known
+    /// yet or it never will be: explored floor grows as it's found.
+    /// </summary>
+    private float? FitZoom
+    {
+        get
+        {
+            if (Maps.AreaSize is not { } size || size < 1f)
+                return null;
 
             // Explored floor grows as it's found, so it only tells how big a place is once the
             // mapping is done. Fields are only ever mapped around you.
             if (!Maps.FromPicture && (Maps.Current?.IsOpenWorld != false || MappingProgress is not null))
-                return view.Zoom;
+                return null;
 
             // The area's longest side spans most of the circle's width, at 1080p.
+            var view = View;
             var shape = MathF.Sqrt(Math.Clamp(view.Width, 0.3f, 1f) * Math.Clamp(view.Height, 0.3f, 1f));
-            var fit = 2f * view.Radius * shape * 1080f * 0.85f / size;
-            return Math.Max(view.Zoom, Math.Min(fit, MaxZoom));
+            return 2f * view.Radius * shape * 1080f * 0.85f / size;
         }
     }
 
@@ -445,9 +467,15 @@ public sealed class Plugin : IDalamudPlugin
             if (!ClientState.IsLoggedIn) return;
 
             var mode = ExplorerMode;
+            var start = FrameTimes.Start();
             Maps.Update(config, Now, mode == ExploreMode.Survey ? Explorer : null);
+            Times.Add("map update", start);
+            start = FrameTimes.Start();
             Live.Update(config, Maps.Current, Now);
+            Times.Add("markers", start);
+            start = FrameTimes.Start();
             UpdateExplorer(config, mode);
+            Times.Add("explorer", start);
             if (config.ShowTrail && Live.PlayerPosition is { } walked && !Condition[ConditionFlag.BetweenAreas])
                 Trail.Update(walked, Now, Math.Clamp(config.TrailSeconds, 3f, 30f));
             UpdateProgress(mode, (float)framework.UpdateDelta.TotalSeconds);
@@ -496,8 +524,12 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
+            var start = FrameTimes.Start();
             Maps.BeginFrame(Now, ReducedMotion);
+            Times.Add("map textures", start);
+            start = FrameTimes.Start();
             Overlay.Draw(WantsMap, ImGui.GetIO().DeltaTime);
+            Times.Add("drawing", start);
             ConfigWindow.Draw();
         }
         catch (Exception ex)

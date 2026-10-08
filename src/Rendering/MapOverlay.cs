@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.GameFonts;
@@ -8,6 +9,7 @@ using Dalamud.Interface.Textures;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using MoogleMap.Map;
 using MoogleMap.Models;
+using MoogleMap.Services;
 
 namespace MoogleMap.Rendering;
 
@@ -29,7 +31,19 @@ public sealed class MapOverlay : IDisposable
 
     private float shown;
     private float zoom;
+    /// <summary>How far the map has moved from following you to holding <see cref="middle"/> still, 0 to 1.</summary>
+    private float hold;
+    /// <summary>The middle of the small place last held, by world X/Z, kept while easing back to you.</summary>
+    private Vector2 middle;
     private Vector2 cameraForward = new(0f, -1f);
+
+    /// <summary>
+    /// Counts frames, so work done once a frame (projecting the map and its walls onto the screen)
+    /// is reused by every piece the map is drawn in around game windows, rather than redone each time.
+    /// </summary>
+    private int frame;
+    private readonly Dictionary<ulong, ProjectedGrid> grids = new();
+    private readonly Dictionary<IReadOnlyList<WallLine>, ProjectedWalls> projectedWalls = new(ReferenceEqualityComparer.Instance);
 
     public MapOverlay(Plugin plugin)
     {
@@ -61,9 +75,21 @@ public sealed class MapOverlay : IDisposable
             zoom += (plugin.Zoom - zoom) * Math.Clamp(dt * 12f, 0f, 1f);
 
         if (shown <= 0.001f) return;
+        frame++;
+        ForgetStale();
 
         var player = plugin.Live.PlayerPosition;
         if (player is null) return;
+
+        // A blend between you and the held middle, so both ends are exact: following you doesn't
+        // lag behind, and a held map stays still while you move.
+        var center = plugin.MapCenter;
+        if (center is { } c) middle = c;
+        var wanted = center is null ? 0f : 1f;
+        if (reduced || shown < 0.05f)
+            hold = wanted;
+        else
+            hold = MoveTowards(hold, wanted, dt * 2.5f);
 
         var view = BuildView(config, player.Value, reduced);
         var dl = ImGui.GetBackgroundDrawList();
@@ -72,24 +98,45 @@ public sealed class MapOverlay : IDisposable
         // Open game windows stay on top: draw only into the parts of the screen they leave free.
         var viewport = ImGui.GetMainViewport();
         var reach = new Vector2(view.Radius + 40f * view.PixelScale);
+        var start = FrameTimes.Start();
         var free = config.StayUnderGameWindows
-            ? GameWindows.FreeAreas(viewport.Pos, viewport.Size, view.Center - reach, view.Center + reach, config.IgnoredWindows, config.StayUnderHud)
+            ? GameWindows.FreeAreas(viewport.Pos, viewport.Size, view.Center - reach, view.Center + reach, config.IgnoredWindows, config.StayUnderHud, config.StayUnderMessages)
             : null;
+        plugin.Times.Add("game windows", start);
+        var banners = config.StayUnderGameWindows && config.StayUnderMessages;
         if (free is null)
         {
-            DrawContent(dl, view, config, player.Value);
+            DrawContent(dl, view, config, player.Value, viewport.Pos, viewport.Pos + viewport.Size);
+            if (banners)
+            {
+                dl.PushClipRect(view.Center - reach, view.Center + reach, true);
+                DrawBanners(dl);
+                dl.PopClipRect();
+            }
             return;
         }
 
         foreach (var (min, max) in free)
         {
             dl.PushClipRect(min, max, true);
-            DrawContent(dl, view, config, player.Value);
+            DrawContent(dl, view, config, player.Value, min, max);
+            if (banners) DrawBanners(dl);
             dl.PopClipRect();
         }
     }
 
-    private void DrawContent(ImDrawListPtr dl, MapView view, Configuration config, Vector3 player)
+    /// <summary>
+    /// The game's banners (quest accepted, quest complete) drawn again over the map from their own
+    /// pictures, so only the lettering covers it. Only over the map: elsewhere the game's own shows.
+    /// </summary>
+    private static void DrawBanners(ImDrawListPtr dl)
+    {
+        foreach (var banner in GameWindows.Banners)
+            dl.AddImage(banner.Texture, banner.Min, banner.Max, banner.Uv0, banner.Uv1, Draw2D.Color(Vector4.One, banner.Alpha));
+    }
+
+    /// <param name="clipMin">The piece of screen being drawn into: what's wholly outside it is skipped.</param>
+    private void DrawContent(ImDrawListPtr dl, MapView view, Configuration config, Vector3 player, Vector2 clipMin, Vector2 clipMax)
     {
         var effects = config.Effects;
         var still = plugin.ReducedMotion;
@@ -98,8 +145,8 @@ public sealed class MapOverlay : IDisposable
         foreach (var layer in plugin.Maps.Layers)
         {
             if (layer.Alpha <= 0.002f) continue;
-            DrawTexture(dl, view, layer.Map, layer.Texture.Handle, view.MapOpacity * layer.Alpha);
-            DrawWalls(dl, view, layer.Map, layer.Walls, config, view.MapOpacity * layer.Alpha,
+            DrawTexture(dl, view, layer.Map, layer.Texture.Handle, view.MapOpacity * layer.Alpha, clipMin, clipMax);
+            DrawWalls(dl, view, layer.Map, layer.Walls, config, view.MapOpacity * layer.Alpha, clipMin, clipMax,
                 effects && config.EffectSweep && !still ? (float)plugin.Now : null);
         }
 
@@ -200,7 +247,7 @@ public sealed class MapOverlay : IDisposable
             // Width and height only trim the circle; its size and the map's scale stay put.
             Stretch = new Vector2(Math.Clamp(plugin.View.Width, 0.3f, 1f), Math.Clamp(plugin.View.Height, 0.3f, 1f)),
             FadeStart = 1f - Math.Clamp(config.EdgeFade, 0.02f, 0.9f),
-            Origin = new Vector2(player.X, player.Z),
+            Origin = Vector2.Lerp(new Vector2(player.X, player.Z), middle, hold * hold * (3f - 2f * hold)),
             Scale = zoom * pixelScale * grow,
             Cos = cos,
             Sin = sin,
@@ -234,54 +281,34 @@ public sealed class MapOverlay : IDisposable
     /// can fade per vertex and the map can turn freely. The circle's bounding box in texture space
     /// doesn't depend on rotation, which keeps this simple.
     /// </summary>
-    private static void DrawTexture(ImDrawListPtr dl, MapView view, MapInfo map, ImTextureID texture, float opacity)
+    private void DrawTexture(ImDrawListPtr dl, MapView view, MapInfo map, ImTextureID texture, float opacity, Vector2 clipMin, Vector2 clipMax)
     {
-        var pixelsPerTexel = view.Scale / map.Scale;
-        var reach = view.Radius / pixelsPerTexel;
-        var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
-
-        var min = Vector2.Clamp(centre - new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
-        var max = Vector2.Clamp(centre + new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
-        if (max.X - min.X < 1f || max.Y - min.Y < 1f) return;
+        if (!grids.TryGetValue(texture.Handle, out var grid))
+            grids[texture.Handle] = grid = new ProjectedGrid();
+        if (grid.Frame != frame)
+            grid.Project(view, map, opacity, frame);
+        if (!grid.Any) return;
 
         const int side = Grid + 1;
-        Span<Vector2> pos = stackalloc Vector2[side * side];
-        Span<Vector2> uv = stackalloc Vector2[side * side];
-        Span<uint> col = stackalloc uint[side * side];
+        var pos = grid.Positions;
+        var uv = grid.Uvs;
+        var col = grid.Colours;
 
-        var any = false;
-        for (var j = 0; j < side; j++)
-        {
-            for (var i = 0; i < side; i++)
-            {
-                var t = new Vector2(min.X + (max.X - min.X) * i / Grid, min.Y + (max.Y - min.Y) * j / Grid);
-                var s = view.ToScreen(map.TextureToWorld(t));
-                var a = view.Fade(s) * view.Alpha * opacity;
-                var k = j * side + i;
-                pos[k] = s;
-                uv[k] = t / MapInfo.TextureSize;
-                col[k] = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, a));
-                any |= a > 0.002f;
-            }
-        }
-
-        if (!any) return;
-
-        dl.PushTextureID(texture);
-
-        // Only cells with something visible in them.
+        // Only cells with something visible in them, inside this piece of the screen.
         var cells = 0;
         for (var j = 0; j < Grid; j++)
             for (var i = 0; i < Grid; i++)
-                if (Visible(col, j * side + i, side)) cells++;
+                if (Shows(grid, j * side + i, clipMin, clipMax)) cells++;
+        if (cells == 0) return;
 
+        dl.PushTextureID(texture);
         dl.PrimReserve(cells * 6, cells * 4);
         for (var j = 0; j < Grid; j++)
         {
             for (var i = 0; i < Grid; i++)
             {
                 var k = j * side + i;
-                if (!Visible(col, k, side)) continue;
+                if (!Shows(grid, k, clipMin, clipMax)) continue;
 
                 var idx = (ushort)dl.VtxCurrentIdx;
                 dl.PrimWriteVtx(pos[k], uv[k], col[k]);
@@ -296,52 +323,182 @@ public sealed class MapOverlay : IDisposable
                 dl.PrimWriteIdx((ushort)(idx + 3));
             }
         }
-
         dl.PopTextureID();
+    }
+
+    /// <summary>Whether a grid cell has something visible and reaches into the piece of screen being drawn.</summary>
+    private static bool Shows(ProjectedGrid grid, int k, Vector2 clipMin, Vector2 clipMax)
+    {
+        const int side = Grid + 1;
+        var col = grid.Colours;
+        if ((col[k] | col[k + 1] | col[k + side] | col[k + side + 1]) >> 24 == 0) return false;
+
+        var pos = grid.Positions;
+        var min = Vector2.Min(Vector2.Min(pos[k], pos[k + 1]), Vector2.Min(pos[k + side], pos[k + side + 1]));
+        var max = Vector2.Max(Vector2.Max(pos[k], pos[k + 1]), Vector2.Max(pos[k + side], pos[k + side + 1]));
+        return max.X >= clipMin.X && min.X <= clipMax.X && max.Y >= clipMin.Y && min.Y <= clipMax.Y;
+    }
+
+    /// <summary>
+    /// The map texture's grid on screen for one frame: covering just the part of the map inside the
+    /// circle, so the rim can fade per vertex and the map can turn freely. The circle's bounding box
+    /// in texture space doesn't depend on rotation, which keeps this simple.
+    /// </summary>
+    private sealed class ProjectedGrid
+    {
+        private const int Side = Grid + 1;
+        public readonly Vector2[] Positions = new Vector2[Side * Side];
+        public readonly Vector2[] Uvs = new Vector2[Side * Side];
+        public readonly uint[] Colours = new uint[Side * Side];
+        public int Frame = -1;
+        public bool Any;
+
+        public void Project(MapView view, MapInfo map, float opacity, int frame)
+        {
+            Frame = frame;
+            Any = false;
+
+            var pixelsPerTexel = view.Scale / map.Scale;
+            var reach = view.Radius / pixelsPerTexel;
+            var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
+            var min = Vector2.Clamp(centre - new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
+            var max = Vector2.Clamp(centre + new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
+            if (max.X - min.X < 1f || max.Y - min.Y < 1f) return;
+
+            // ImGui's colour packing, done here instead of a call per vertex.
+            var alpha = view.Alpha * opacity * ImGui.GetStyle().Alpha;
+            for (var j = 0; j < Side; j++)
+            {
+                for (var i = 0; i < Side; i++)
+                {
+                    var t = new Vector2(min.X + (max.X - min.X) * i / Grid, min.Y + (max.Y - min.Y) * j / Grid);
+                    var s = view.ToScreen(map.TextureToWorld(t));
+                    var a = Math.Clamp(view.Fade(s) * alpha, 0f, 1f);
+                    var k = j * Side + i;
+                    Positions[k] = s;
+                    Uvs[k] = t / MapInfo.TextureSize;
+                    Colours[k] = 0x00FFFFFFu | (uint)(a * 255f + 0.5f) << 24;
+                    Any |= a > 0.002f;
+                }
+            }
+        }
     }
 
     /// <summary>
     /// Wall lines on top of the floor fill, at a fixed pixel thickness so they stay sharp however far
     /// the map is zoomed. Each line is stroked in runs of equal fade, so the rim still softens them.
     /// </summary>
-    private static void DrawWalls(ImDrawListPtr dl, MapView view, MapInfo map, IReadOnlyList<WallLine> walls, Configuration config, float fade, float? sweepTime)
+    private void DrawWalls(ImDrawListPtr dl, MapView view, MapInfo map, IReadOnlyList<WallLine> walls, Configuration config, float fade,
+        Vector2 clipMin, Vector2 clipMax, float? sweepTime)
     {
         if (walls.Count == 0) return;
 
-        var reach = view.Radius / (view.Scale / map.Scale);
-        var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
-        var min = centre - new Vector2(reach);
-        var max = centre + new Vector2(reach);
+        if (!projectedWalls.TryGetValue(walls, out var projected))
+            projectedWalls[walls] = projected = new ProjectedWalls();
+        if (projected.Frame != frame)
+            projected.Project(view, map, walls, frame);
+        if (projected.Lines.Count == 0) return;
+
         var opacity = view.Alpha * fade;
         var thickness = config.WallThickness * view.PixelScale;
-
-        var visible = new List<WallLine>();
-        foreach (var wall in walls)
-            if (wall.Max.X >= min.X && wall.Min.X <= max.X && wall.Max.Y >= min.Y && wall.Min.Y <= max.Y)
-                visible.Add(wall);
-        if (visible.Count == 0) return;
+        // Wide enough for the glow either side of a line.
+        var margin = new Vector2(thickness * 2f);
+        var lo = clipMin - margin;
+        var hi = clipMax + margin;
+        var points = projected.Points;
+        var fades = projected.Fades;
 
         if (config.WallGlow)
-            foreach (var wall in visible)
-                Draw2D.FadedPolyline(dl, view, wall.Points, p => view.ToScreen(map.TextureToWorld(p)),
-                    config.EdgeColor, opacity * 0.22f, thickness * 3.2f);
+            foreach (var line in projected.Lines)
+                if (line.Overlaps(lo, hi))
+                    Draw2D.FadedPolyline(dl, points.AsSpan(line.Start, line.Count), fades.AsSpan(line.Start, line.Count),
+                        config.EdgeColor, opacity * 0.22f, thickness * 3.2f);
 
-        foreach (var wall in visible)
-            Draw2D.FadedPolyline(dl, view, wall.Points, p => view.ToScreen(map.TextureToWorld(p)),
-                config.EdgeColor, opacity, thickness);
+        foreach (var line in projected.Lines)
+            if (line.Overlaps(lo, hi))
+                Draw2D.FadedPolyline(dl, points.AsSpan(line.Start, line.Count), fades.AsSpan(line.Start, line.Count),
+                    config.EdgeColor, opacity, thickness);
 
         // The sweep: a band of light running out from the player, lighting walls as it crosses them.
         if (sweepTime is { } now && Effects.Sweep(view, now) is { } band)
         {
             var bright = Draw2D.Lighten(config.EdgeColor, 0.65f);
-            foreach (var wall in visible)
-                Draw2D.FadedPolyline(dl, view, wall.Points, p => view.ToScreen(map.TextureToWorld(p)),
-                    bright, opacity * band.Strength, thickness * 1.7f, screen => band.At(screen));
+            foreach (var line in projected.Lines)
+                if (line.Overlaps(lo, hi))
+                    Draw2D.FadedPolyline(dl, points.AsSpan(line.Start, line.Count), fades.AsSpan(line.Start, line.Count),
+                        bright, opacity * band.Strength, thickness * 1.7f, band);
         }
     }
 
-    private static bool Visible(Span<uint> col, int k, int side)
-        => (col[k] | col[k + 1] | col[k + side] | col[k + side + 1]) >> 24 != 0;
+    /// <summary>
+    /// A map's wall lines on screen for one frame, with each point's rim fade: only the lines that
+    /// reach into the circle, and only those not faded out entirely.
+    /// </summary>
+    private sealed class ProjectedWalls
+    {
+        public readonly record struct Line(int Start, int Count, Vector2 Min, Vector2 Max)
+        {
+            public bool Overlaps(Vector2 lo, Vector2 hi) => Max.X >= lo.X && Min.X <= hi.X && Max.Y >= lo.Y && Min.Y <= hi.Y;
+        }
+
+        public Vector2[] Points = new Vector2[4096];
+        public float[] Fades = new float[4096];
+        public readonly List<Line> Lines = [];
+        public int Frame = -1;
+
+        public void Project(MapView view, MapInfo map, IReadOnlyList<WallLine> walls, int frame)
+        {
+            Frame = frame;
+            Lines.Clear();
+
+            var reach = view.Radius / (view.Scale / map.Scale);
+            var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
+            var min = centre - new Vector2(reach);
+            var max = centre + new Vector2(reach);
+
+            var used = 0;
+            foreach (var wall in walls)
+            {
+                if (wall.Max.X < min.X || wall.Min.X > max.X || wall.Max.Y < min.Y || wall.Min.Y > max.Y) continue;
+
+                var count = wall.Points.Length;
+                if (used + count > Points.Length)
+                {
+                    var size = Math.Max(Points.Length * 2, used + count);
+                    Array.Resize(ref Points, size);
+                    Array.Resize(ref Fades, size);
+                }
+
+                var lineMin = new Vector2(float.MaxValue);
+                var lineMax = new Vector2(float.MinValue);
+                var shows = false;
+                for (var i = 0; i < count; i++)
+                {
+                    var s = view.ToScreen(map.TextureToWorld(wall.Points[i]));
+                    var f = view.Fade(s);
+                    Points[used + i] = s;
+                    Fades[used + i] = f;
+                    shows |= f > 0f;
+                    lineMin = Vector2.Min(lineMin, s);
+                    lineMax = Vector2.Max(lineMax, s);
+                }
+
+                if (!shows) continue;
+                Lines.Add(new Line(used, count, lineMin, lineMax));
+                used += count;
+            }
+        }
+    }
+
+    /// <summary>Drops projections of maps no longer drawn, such as one that has finished fading out.</summary>
+    private void ForgetStale()
+    {
+        if (frame % 120 != 0) return;
+        foreach (var key in grids.Where(e => frame - e.Value.Frame > 120).Select(e => e.Key).ToList())
+            grids.Remove(key);
+        foreach (var key in projectedWalls.Where(e => frame - e.Value.Frame > 120).Select(e => e.Key).ToList())
+            projectedWalls.Remove(key);
+    }
 
     // ------------------------------------------------------------------
     // Fixed map icons and names
@@ -919,7 +1076,11 @@ public sealed class MapOverlay : IDisposable
     public void Dispose() => compassFont.Dispose();
 
     /// <summary>Forgets per-zone state.</summary>
-    public void Reset() => explored.Invalidate();
+    public void Reset()
+    {
+        explored.Invalidate();
+        hold = 0f;
+    }
 
     private static float MoveTowards(float value, float target, float step)
         => value < target ? Math.Min(value + step, target) : Math.Max(value - step, target);

@@ -285,6 +285,10 @@ public class ConfigWindow : Window
             ToggleRow("Stay under the HUD", Config.StayUnderHud, v => Config.StayUnderHud = v,
                 "Hotbars, HP bars, the party list, job gauges, the chat and notices like the loot one sit on top of the map too. "
                 + "Off, only menus and dialogues do, and the map draws over the HUD.");
+        if (Config.StayUnderGameWindows)
+            ToggleRow("Stay under screen messages", Config.StayUnderMessages, v => Config.StayUnderMessages = v,
+                "The banners across the middle of the screen, like quest accepted, quest complete and duty commenced, "
+                + "show on top of the map: just the lettering, with the map still drawn all around it.");
         ToggleRow("Hide game minimap", Config.HideGameMinimap, v => Config.HideGameMinimap = v,
             "Hides the game's own minimap, ring and buttons included, for a cleaner screen with MoogleMap a key away. "
             + "Put back as soon as you turn this off.");
@@ -431,6 +435,9 @@ public class ConfigWindow : Window
         ToggleRow("Fit small places", Config.FitSmallAreas, v => Config.FitSmallAreas = v,
             "Zooms in further on small places, like inn rooms, trial arenas and short dungeon floors, so they fill the map instead of a "
             + "corner of it. Never zooms out past the setting above. Places mapped by exploring are fitted once the mapping is done.");
+        ToggleRow("Centre small places", Config.CenterSmallAreas, v => Config.CenterSmallAreas = v,
+            "When a whole place fits on the map, the map holds still on its middle and your arrow moves over it, instead of the "
+            + "map following you and pushing part of the place off the edge. Zoom in past the fit and it follows you again.");
         FloatRow("Radius", view.Radius, v => view.Radius = v, 0.15f, 0.6f, "%.2f");
         HelpAfter("How big the map is, as a share of your screen height.");
         FloatRow("Width", view.Width, v => view.Width = v, 0.3f, 1f, "%.2f");
@@ -781,6 +788,7 @@ public class ConfigWindow : Window
             StateRow("Ignored windows", string.Join(", ", Config.IgnoredWindows));
         StateRow("Maps in memory", plugin.Maps.CachedMaps.ToString());
         StateRow("Frame errors", plugin.FrameErrors.ToString());
+        StateRow("Frame cost (avg / worst ms)", plugin.Times.Summary);
     }
 
     private static void StateRow(string label, string value)
@@ -876,6 +884,7 @@ public class ConfigWindow : Window
                       + $"rotate {OnOff(Config.RotateWithCamera)}, anchor {Config.Anchor}, explore {OnOff(Config.ExploreUnmapped)}");
         sb.AppendLine($"- State: hidden {plugin.HiddenReason ?? "no"}, shown {OnOff(Config.Shown)}, frame errors {plugin.FrameErrors}, "
                       + $"explorer {plugin.ExplorerMode} {plugin.Explorer.FloorCells} cells / {plugin.Explorer.Raycasts} raycasts, fused {plugin.Maps.FusedCells}");
+        sb.AppendLine($"- Frame cost (avg / worst ms, last 2 s): {plugin.Times.Summary}");
         sb.AppendLine($"- Generated: {DateTime.Now:yyyy-MM-dd HH:mm}");
         sb.AppendLine();
         sb.AppendLine("```text");

@@ -99,9 +99,12 @@ public static class Draw2D
     /// <summary>
     /// Strokes a polyline whose points fade with the map's rim. Consecutive points of the same
     /// (quantised) fade go out as one path, so joints stay clean and the call count stays low.
+    /// Takes points already on screen, with each one's rim fade, so a line projected once a frame
+    /// can be stroked several times over.
     /// </summary>
-    public static void FadedPolyline(ImDrawListPtr dl, MapView view, Vector2[] points, Func<Vector2, Vector2> toScreen,
-        Vector4 colour, float alpha, float thickness, Func<Vector2, float>? shape = null)
+    /// <param name="band">Lights only where a sweep band crosses, on top of the rim fade.</param>
+    public static void FadedPolyline(ImDrawListPtr dl, ReadOnlySpan<Vector2> points, ReadOnlySpan<float> fades,
+        Vector4 colour, float alpha, float thickness, Effects.SweepBand? band = null)
     {
         const float steps = 16f;
         var count = 0;
@@ -110,8 +113,9 @@ public static class Draw2D
 
         for (var i = 0; i < points.Length; i++)
         {
-            var s = toScreen(points[i]);
-            var l = (int)MathF.Round(view.Fade(s) * (shape?.Invoke(s) ?? 1f) * steps);
+            var s = points[i];
+            var shape = band is { } b ? b.At(s) : 1f;
+            var l = (int)MathF.Round(fades[i] * shape * steps);
 
             if (l != level)
             {

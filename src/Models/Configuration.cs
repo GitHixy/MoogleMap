@@ -94,6 +94,8 @@ public class Configuration
     public bool StayUnderGameWindows { get; set; } = true;
     /// <summary>Also keep the HUD (bars, party list, gauges, loot notices) on top of the map.</summary>
     public bool StayUnderHud { get; set; } = true;
+    /// <summary>Draw the banners across the screen (quest accepted, quest complete) over the map, lettering only.</summary>
+    public bool StayUnderMessages { get; set; } = true;
     /// <summary>Game windows the map never makes room for, by addon name.</summary>
     public HashSet<string> IgnoredWindows { get; set; } = [];
 
@@ -118,6 +120,8 @@ public class Configuration
     public Dictionary<ContentKind, ViewPreset> Views { get; set; } = new();
     /// <summary>Zoom in on small places, like trial arenas, until they fill the map instead of a corner of it.</summary>
     public bool FitSmallAreas { get; set; } = true;
+    /// <summary>When a whole small place fits on the map, keep the place in the middle and let you move over it.</summary>
+    public bool CenterSmallAreas { get; set; } = true;
     /// <summary>Turn the map with the camera so "up" is where you're looking. Off is north-up.</summary>
     public bool RotateWithCamera { get; set; } = true;
     public MapAnchor Anchor { get; set; } = MapAnchor.Screen;
