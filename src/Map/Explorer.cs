@@ -64,7 +64,15 @@ public sealed class Explorer
     private const int ScanLimit = 3000;
 
     private const int FileMagic = 0x4D4D5850; // "MMXP"
-    private const int FileVersion = 4;
+    private const int FileVersion = 5;
+
+    /// <summary>
+    /// How far around where the player has walked, in yalms, the search may go past
+    /// <see cref="Bounds"/>: having stood there proves the outline traced from the picture wrong.
+    /// </summary>
+    public const float WalkedReach = 6f;
+    /// <summary>Longest move between ticks still filled in as walked, in yalms; more is a teleport or a fall.</summary>
+    private const float WalkGap = 4f;
 
     private readonly record struct Pending(int X, int Z, float FromHeight, int FromX, int FromZ);
 
@@ -95,6 +103,12 @@ public sealed class Explorer
     private Task saving = Task.CompletedTask;
     /// <summary>Seeds that found no ground (someone flying, jumping or on a mount), not worth casting for again.</summary>
     private readonly HashSet<(long Cell, int Level)> barrenSeeds = new(CellKeys.Instance);
+    /// <summary>Cells the player has stood on: floor for certain, whatever the picture says.</summary>
+    private HashSet<long> walked = new(CellKeys.Instance);
+    /// <summary>Cells within <see cref="WalkedReach"/> of a walked one, where the search ignores <see cref="Bounds"/>.</summary>
+    private HashSet<long> walkedZone = new(CellKeys.Instance);
+    /// <summary>Where the player last stood on known ground, to fill in the cells between ticks.</summary>
+    private Vector3? lastWalked;
     private List<Pending> frontier = [];
     /// <summary>
     /// What was saved for this territory, being read in the background: a big area takes a second
@@ -136,6 +150,9 @@ public sealed class Explorer
         sidesToTest.Clear();
         blockedSides.Clear();
         barrenSeeds.Clear();
+        walked.Clear();
+        walkedZone.Clear();
+        lastWalked = null;
         frontier.Clear();
         loading = null;
         cursor = 0;
@@ -187,6 +204,8 @@ public sealed class Explorer
         blockedSides = loaded.BlockedSides;
         sidesToTest = loaded.SidesToTest;
         frontier = loaded.Frontier;
+        walked = loaded.Walked;
+        walkedZone = loaded.WalkedZone;
         cursor = 0;
         Revision++;
         Plugin.Log.Debug("Loaded {Count} explored cells for territory {Territory}", cells.Count, Territory);
@@ -204,8 +223,15 @@ public sealed class Explorer
         watch.Restart();
         var start = Services.FrameTimes.Start();
 
-        if (!Seed(player, remember: false))
+        if (Seed(player, remember: false))
+        {
+            Walk(player);
+        }
+        else
+        {
+            lastWalked = null;
             SeedBelow(player);
+        }
         if (cells.Count == 0 && Raycasts > 200 && !warnedBarren)
         {
             // Not even the ground under the player: something is off with the collision queries.
@@ -374,11 +400,72 @@ public sealed class Explorer
             AddFloor(x, z, ground.Point.Y);
     }
 
+    /// <summary>
+    /// Marks the ground the player stands on as walked, and the cells passed over since the last
+    /// tick, so a quick move on a mount leaves no gaps.
+    /// </summary>
+    private void Walk(Vector3 at)
+    {
+        if (lastWalked is { } last)
+        {
+            var step = new Vector2(at.X - last.X, at.Z - last.Z);
+            var length = step.Length();
+            if (length <= WalkGap && MathF.Abs(at.Y - last.Y) <= MaxStep)
+            {
+                var samples = (int)MathF.Ceiling(length / (Cell * 0.5f));
+                for (var i = 1; i < samples; i++)
+                {
+                    var t = i / (float)samples;
+                    MarkWalked(Index(last.X + step.X * t), Index(last.Z + step.Y * t));
+                }
+            }
+        }
+
+        MarkWalked(Index(at.X), Index(at.Z));
+        lastWalked = at;
+    }
+
+    private void MarkWalked(int x, int z)
+    {
+        if (!walked.Add(Key(x, z))) return;
+        Revision++;
+        Dirty = true;
+
+        // Steps and sides turned away by the bounds around here before get another go.
+        var reach = ReachCells(Cell);
+        for (var dz = -reach; dz <= reach; dz++)
+        {
+            for (var dx = -reach; dx <= reach; dx++)
+            {
+                if (dx * dx + dz * dz > reach * reach) continue;
+                var cx = x + dx;
+                var cz = z + dz;
+                var key = Key(cx, cz);
+                if (!walkedZone.Add(key) || !cells.TryGetValue(key, out var levels)) continue;
+
+                sidesToTest.Enqueue(key);
+                foreach (var h in levels)
+                {
+                    Queue(cx + 1, cz, h, cx, cz);
+                    Queue(cx - 1, cz, h, cx, cz);
+                    Queue(cx, cz + 1, h, cx, cz);
+                    Queue(cx, cz - 1, h, cx, cz);
+                }
+            }
+        }
+    }
+
+    private static int ReachCells(float cell) => (int)MathF.Ceiling(WalkedReach / cell);
+
+    /// <summary>Whether the search may go into a cell: inside the bounds, or near where the player has walked.</summary>
+    private bool InBounds(int x, int z)
+        => Bounds is not { } bounds || bounds((x + 0.5f) * Cell, (z + 0.5f) * Cell) || walkedZone.Contains(Key(x, z));
+
     private void Expand(Pending p)
     {
         var key = Key(p.X, p.Z);
         if (HasLevel(key, p.FromHeight, out _)) return;
-        if (Bounds is { } bounds && !bounds((p.X + 0.5f) * Cell, (p.Z + 0.5f) * Cell)) return;
+        if (!InBounds(p.X, p.Z)) return;
         if (!tried.Add((key, Level(p.FromHeight), Side(p)))) return;
 
         var feet = p.FromHeight;
@@ -434,7 +521,7 @@ public sealed class Explorer
     {
         if (!cells.TryGetValue(key, out var levels)) return;
         var (x, z) = Unpack(key);
-        if (Bounds is { } bounds && !bounds((x + 0.5f) * Cell, (z + 0.5f) * Cell)) return;
+        if (!InBounds(x, z)) return;
         sides.TryGetValue(key, out var known);
 
         if ((known & Sides.EastTested) == 0)
@@ -604,6 +691,14 @@ public sealed class Explorer
     /// </summary>
     public CellSide[] Walls() => blockedSides.ToArray();
 
+    /// <summary>A copy of the cells the player has stood on, as packed keys, safe to hand to a worker thread.</summary>
+    public long[] WalkedSnapshot()
+    {
+        var result = new long[walked.Count];
+        walked.CopyTo(result);
+        return result;
+    }
+
     // ------------------------------------------------------------------
     // Saving
     // ------------------------------------------------------------------
@@ -619,11 +714,12 @@ public sealed class Explorer
         ((ICollection<KeyValuePair<long, float[]>>)cells).CopyTo(cellCopy, 0);
         var sideCopy = new KeyValuePair<long, Sides>[sides.Count];
         ((ICollection<KeyValuePair<long, Sides>>)sides).CopyTo(sideCopy, 0);
+        var walkedCopy = WalkedSnapshot();
         var territory = Territory;
         var cell = Cell;
         Dirty = false;
 
-        saving = saving.ContinueWith(_ => Write(file, territory, cell, cellCopy, sideCopy), TaskScheduler.Default);
+        saving = saving.ContinueWith(_ => Write(file, territory, cell, cellCopy, sideCopy, walkedCopy), TaskScheduler.Default);
     }
 
     /// <summary>Waits for a save still being written, for when the plugin unloads.</summary>
@@ -639,7 +735,7 @@ public sealed class Explorer
         }
     }
 
-    private static void Write(string file, uint territory, float cell, KeyValuePair<long, float[]>[] cellCopy, KeyValuePair<long, Sides>[] sideCopy)
+    private static void Write(string file, uint territory, float cell, KeyValuePair<long, float[]>[] cellCopy, KeyValuePair<long, Sides>[] sideCopy, long[] walkedCopy)
     {
         try
         {
@@ -670,6 +766,10 @@ public sealed class Explorer
                     writer.Write(key);
                     writer.Write((byte)known);
                 }
+
+                writer.Write(walkedCopy.Length);
+                foreach (var key in walkedCopy)
+                    writer.Write(key);
             }
 
             File.Move(temp, file, overwrite: true);
@@ -686,7 +786,9 @@ public sealed class Explorer
         Dictionary<long, Sides> Sides,
         List<CellSide> BlockedSides,
         Queue<long> SidesToTest,
-        List<Pending> Frontier);
+        List<Pending> Frontier,
+        HashSet<long> Walked,
+        HashSet<long> WalkedZone);
 
     /// <summary>Reads a save. Touches nothing of the explorer's own, so it can run in the background.</summary>
     private static Loaded? Load(string file, uint territory, float cellSize)
@@ -698,9 +800,9 @@ public sealed class Explorer
             if (reader.ReadInt32() != FileMagic)
                 return null;
             // Older versions have the same floor; their sides (none in 2, tested with a single ray
-            // in 3) are tested again.
+            // in 3) are tested again, and before 5 where the player walked wasn't kept.
             var version = reader.ReadInt32();
-            if (version is not (2 or 3 or FileVersion) || reader.ReadUInt32() != territory)
+            if (version is not (2 or 3 or 4 or FileVersion) || reader.ReadUInt32() != territory)
                 return null;
 
             // Cells of another size don't line up with this grid; start over rather than mix them.
@@ -720,7 +822,7 @@ public sealed class Explorer
 
             var sides = new Dictionary<long, Sides>(CellKeys.Instance);
             var blockedSides = new List<CellSide>();
-            if (version >= FileVersion)
+            if (version >= 4)
             {
                 var sideCount = reader.ReadInt32();
                 sides.EnsureCapacity(sideCount);
@@ -734,6 +836,26 @@ public sealed class Explorer
                         blockedSides.Add(new CellSide(x, z, East: true));
                     if ((known & Sides.SouthBlocked) != 0)
                         blockedSides.Add(new CellSide(x, z, East: false));
+                }
+            }
+
+            var walked = new HashSet<long>(CellKeys.Instance);
+            var walkedZone = new HashSet<long>(CellKeys.Instance);
+            if (version >= 5)
+            {
+                var walkedCount = reader.ReadInt32();
+                walked.EnsureCapacity(walkedCount);
+                for (var i = 0; i < walkedCount; i++)
+                    walked.Add(reader.ReadInt64());
+
+                var reach = ReachCells(cellSize);
+                foreach (var key in walked)
+                {
+                    var (x, z) = Unpack(key);
+                    for (var dz = -reach; dz <= reach; dz++)
+                        for (var dx = -reach; dx <= reach; dx++)
+                            if (dx * dx + dz * dz <= reach * reach)
+                                walkedZone.Add(Key(x + dx, z + dz));
                 }
             }
 
@@ -753,7 +875,7 @@ public sealed class Explorer
                 }
             }
 
-            return new Loaded(cells, sides, blockedSides, sidesToTest, frontier);
+            return new Loaded(cells, sides, blockedSides, sidesToTest, frontier, walked, walkedZone);
 
             // Nothing has been tried yet, so only cells already known on that level are left out.
             void Edge(int x, int z, float height, int fromX, int fromZ)

@@ -126,12 +126,12 @@ public sealed class MapService : IDisposable
         }
     }
 
-    private (long[] Cells, CellSide[] Sides) Cells(Explorer? survey)
+    private (long[] Cells, CellSide[] Sides, long[] Walked) Cells(Explorer? survey)
     {
-        if (survey is null) return ([], []);
+        if (survey is null) return ([], [], []);
         fusedRevision = survey.Revision;
         snapshotCell = survey.Cell;
-        return (survey.Snapshot(), survey.Walls());
+        return (survey.Snapshot(), survey.Walls(), survey.WalkedSnapshot());
     }
 
     /// <summary>Draw-thread hook: brings in finished maps, advances fades and frees what faded out.</summary>
@@ -247,9 +247,9 @@ public sealed class MapService : IDisposable
             Plugin.Log.Debug("Map changed to {Id} ({Key}) {Name}", mapId, Current?.Key ?? "-", Current?.DisplayName ?? "-");
     }
 
-    private void Load(MapInfo map, Vector4 colour, (long[] Cells, CellSide[] Sides) explored)
+    private void Load(MapInfo map, Vector4 colour, (long[] Cells, CellSide[] Sides, long[] Walked) explored)
     {
-        var (cells, sides) = explored;
+        var (cells, sides, walked) = explored;
         loading?.Cancel();
         var cts = new CancellationTokenSource();
         loading = cts;
@@ -263,7 +263,9 @@ public sealed class MapService : IDisposable
             var traced = Traced(map, colour, cts.Token);
 
             cts.Token.ThrowIfCancellationRequested();
-            var shown = cells.Length > 0 ? MapStylizer.Fuse(traced, map, cells, sides, cell, colour) : traced;
+            var shown = cells.Length > 0 || walked.Length > 0
+                ? MapStylizer.Fuse(traced, map, cells, sides, walked, cell, colour)
+                : traced;
             cts.Token.ThrowIfCancellationRequested();
 
             var texture = await Plugin.TextureProvider.CreateFromRawAsync(

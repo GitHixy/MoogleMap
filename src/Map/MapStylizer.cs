@@ -81,14 +81,24 @@ public static class MapStylizer
     /// </summary>
     /// <param name="cells">Walkable cells as explorer keys (see <see cref="Explorer.Unpack"/>), <paramref name="cell"/> yalms square.</param>
     /// <param name="sides">Blocked sides between walkable cells: walls too thin to leave a gap in them.</param>
+    /// <param name="walked">Cells the player has stood on, as explorer keys: always drawn, footprint or not.</param>
     public static StylizedMap Fuse(StylizedMap source, MapInfo map, IReadOnlyList<long> cells,
-        IReadOnlyList<CellSide> sides, float cell, Vector4 colour)
+        IReadOnlyList<CellSide> sides, IReadOnlyList<long> walked, float cell, Vector4 colour)
     {
         var n = source.Size;
         var floor = (bool[])source.Traced.Clone();
         var toProcessed = (float)n / MapInfo.TextureSize;
+        var pixelsPerYalm = map.Scale * toProcessed;
 
+        // Having stood somewhere proves the footprint wrong there, and around it the explorer is
+        // let past the footprint too; what it finds there has to make it onto the map.
         var footprint = source.Footprint;
+        if (footprint is not null && walked.Count > 0)
+        {
+            footprint = (bool[])footprint.Clone();
+            Stamp(footprint, n, walked, map, cell, 2 * (int)MathF.Ceiling(Explorer.WalkedReach * pixelsPerYalm) + 1);
+        }
+
         var added = 0;
         foreach (var key in cells)
         {
@@ -110,7 +120,7 @@ public static class MapStylizer
                 }
         }
 
-        if (added == 0 && sides.Count == 0)
+        if (added == 0 && sides.Count == 0 && walked.Count == 0)
             return source;
 
         // Cells are coarse next to the picture; closing seals the seams between the two. Explored
@@ -121,8 +131,12 @@ public static class MapStylizer
 
         // Holes of a few square yalms are lamp posts, crates and missed cells, and only add noise.
         // Fountains, stalls and buildings are bigger and stay on the map.
-        var pixelsPerYalm = map.Scale * toProcessed;
         Fill(floor, n, target: false, maxArea: Math.Max(1, (int)(SmallestHole * pixelsPerYalm * pixelsPerYalm)));
+
+        // A path a cell wide is a pixel wide, and the softening before tracing washes it out to a
+        // faint smear with no walls. Two pixels is the least that survives it, so where the player
+        // has walked is drawn at least that wide, and no wider than they are.
+        Stamp(floor, n, walked, map, cell, Math.Max(2, (int)MathF.Round(WalkedWidth * pixelsPerYalm)));
 
         var painted = Paint(floor, n, colour, source.PaperShare);
         var walls = new List<WallLine>(painted.Walls);
@@ -134,6 +148,27 @@ public static class MapStylizer
     private const float SmallestHole = 6f;
     /// <summary>Thin walls shorter than this many yalms, counting every side they're joined to, are left out.</summary>
     private const int ShortestWall = 3;
+    /// <summary>
+    /// How wide a walked path is drawn, in yalms: about a character's width, so it shows where
+    /// the player went without making up floor beside it.
+    /// </summary>
+    private const float WalkedWidth = 1.5f;
+
+    /// <summary>Sets a square <paramref name="side"/> processed pixels across, centred on the middle of each cell.</summary>
+    private static void Stamp(bool[] mask, int n, IReadOnlyList<long> keys, MapInfo map, float cell, int side)
+    {
+        var toProcessed = (float)n / MapInfo.TextureSize;
+        foreach (var key in keys)
+        {
+            var (cx, cz) = Explorer.Unpack(key);
+            var p = map.WorldToTexture(new Vector3((cx + 0.5f) * cell, 0f, (cz + 0.5f) * cell)) * toProcessed;
+            var x0 = (int)MathF.Round(p.X - side / 2f);
+            var y0 = (int)MathF.Round(p.Y - side / 2f);
+            for (var y = Math.Max(0, y0); y < Math.Min(n, y0 + side); y++)
+                for (var x = Math.Max(0, x0); x < Math.Min(n, x0 + side); x++)
+                    mask[y * n + x] = true;
+        }
+    }
 
     /// <summary>
     /// Thin walls as lines along the cell sides they block, in map texture pixels. Runs of sides
