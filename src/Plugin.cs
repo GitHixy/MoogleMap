@@ -333,7 +333,8 @@ public sealed class Plugin : IDalamudPlugin
         var budget = Maps.Current?.IsOpenWorld == true ? 1.5 : 1.0;
         Explorer.Times = Times;
         Explorer.Bounds = mode == ExploreMode.Survey ? Maps.Bounds : null;
-        Explorer.Update(player, Live.Seeds, ExplorerReach(mode), budget);
+        var airborne = Condition[ConditionFlag.InFlight] || Condition[ConditionFlag.Diving];
+        Explorer.Update(player, airborne, Live.Seeds, ExplorerReach(mode), budget);
 
         if (mode == ExploreMode.Survey && Explorer.Dirty && Now >= saveExploredAt)
         {

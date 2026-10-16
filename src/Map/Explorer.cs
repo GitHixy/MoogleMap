@@ -42,8 +42,6 @@ public sealed class Explorer
 
     /// <summary>Highest rise between neighbouring cells that still counts as walking: stairs and slopes, not ledges.</summary>
     private float MaxStep => 1.2f * Cell;
-    /// <summary>How far down a flying player's ground is looked for, to keep exploring from the air.</summary>
-    private const float FlightReach = 250f;
     /// <summary>Height of the wall test above the feet. Below most overhangs, above most steps.</summary>
     private const float ChestHeight = 1.4f;
     /// <summary>Height of the low wall test: fences, railings and low walls the chest-height test passes over.</summary>
@@ -216,22 +214,22 @@ public sealed class Explorer
     /// Spends up to <paramref name="budgetMs"/> on the search. Seeds are places known to be
     /// walkable; <paramref name="reach"/> limits the search to around the player, or 0 for none.
     /// </summary>
-    public void Update(Vector3 player, IReadOnlyList<Vector3> seeds, float reach, double budgetMs)
+    /// <param name="airborne">
+    /// Flying or diving. Nothing under the player is taken as floor then: places only reachable
+    /// through the air aren't walkable. The search still carries on, around the player, from
+    /// floor already found, so ground connected to it fills in all the same.
+    /// </param>
+    public void Update(Vector3 player, bool airborne, IReadOnlyList<Vector3> seeds, float reach, double budgetMs)
     {
         if (!FinishLoading()) return;
 
         watch.Restart();
         var start = Services.FrameTimes.Start();
 
-        if (Seed(player, remember: false))
-        {
+        if (!airborne && Seed(player, remember: false))
             Walk(player);
-        }
         else
-        {
             lastWalked = null;
-            SeedBelow(player);
-        }
         if (cells.Count == 0 && Raycasts > 200 && !warnedBarren)
         {
             // Not even the ground under the player: something is off with the collision queries.
@@ -384,20 +382,6 @@ public sealed class Explorer
         if (remember)
             barrenSeeds.Add((key, Level(at.Y)));
         return false;
-    }
-
-    /// <summary>
-    /// For a player in the air: finds the ground far below and explores from there, so the map
-    /// keeps filling in while flying.
-    /// </summary>
-    private void SeedBelow(Vector3 at)
-    {
-        if (!Cast(at, -Vector3.UnitY, FlightReach, out var ground) || !Walkable(ground)) return;
-
-        var x = Index(at.X);
-        var z = Index(at.Z);
-        if (!HasLevel(Key(x, z), ground.Point.Y, out _))
-            AddFloor(x, z, ground.Point.Y);
     }
 
     /// <summary>

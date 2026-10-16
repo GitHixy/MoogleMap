@@ -391,7 +391,7 @@ public class ConfigWindow : Window
         if (Config.SurveyMaps)
         {
             FloatRow("Reach in fields", Config.FieldExploreRadius, v => Config.FieldExploreRadius = v, 40f, 200f, "%.0f yalms");
-            HelpAfter("Open fields are mapped around you as you travel, on foot or flying. Further reaches more at once, at the cost of a little more work each frame.");
+            HelpAfter("Open fields are mapped around you as you travel. Flying keeps filling in ground joined to where you've walked, but never takes what's under you as floor: some places can only be flown to. Further reaches more at once, at the cost of a little more work each frame.");
             Row(string.Empty);
             if (Theme.GhostButton("Forget this area", new Vector2(150, 26)))
                 plugin.ResetExplored();
