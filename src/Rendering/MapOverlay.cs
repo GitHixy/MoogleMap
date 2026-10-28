@@ -924,6 +924,8 @@ public sealed class MapOverlay : IDisposable
     private static readonly Vector4 FateTint = new(1f, 0.62f, 0.25f, 1f);
     /// <summary>The light blue the game uses for quest areas on its map.</summary>
     private static readonly Vector4 QuestTint = new(0.4f, 0.72f, 1f, 1f);
+    /// <summary>Critical engagements, blue like the game's, deeper than quest areas.</summary>
+    private static readonly Vector4 EngagementTint = new(0.25f, 0.45f, 1f, 1f);
     private static readonly Vector4 FateWon = new(1f, 0.86f, 0.42f, 1f);
     private static readonly Vector4 FateLost = new(0.55f, 0.55f, 0.6f, 1f);
 
@@ -953,14 +955,15 @@ public sealed class MapOverlay : IDisposable
     {
         var px = view.PixelScale;
         var r = m.Radius * view.Scale;
+        var tint = m.Engagement ? EngagementTint : FateTint;
 
         if (m.Leaving < 0f)
         {
             var enter = Ease(Math.Clamp(m.Age / 0.5f, 0f, 1f));
             if (plugin.ReducedMotion) enter = 1f;
             var rr = r * (0.7f + 0.3f * enter);
-            dl.AddCircleFilled(s, rr, Draw2D.Color(FateTint, a * enter * (m.Active ? 0.12f : 0.06f)), 64);
-            dl.AddCircle(s, rr, Draw2D.Color(FateTint, a * enter * 0.55f), 64, 1.5f * px);
+            dl.AddCircleFilled(s, rr, Draw2D.Color(tint, a * enter * (m.Active ? 0.12f : 0.06f)), 64);
+            dl.AddCircle(s, rr, Draw2D.Color(tint, a * enter * 0.55f), 64, 1.5f * px);
             return;
         }
 
@@ -972,7 +975,7 @@ public sealed class MapOverlay : IDisposable
             {
                 var rr = r * (1f + 0.25f * Ease(t));
                 var fade = (1f - t) * (1f - t);
-                var colour = Vector4.Lerp(FateTint, FateWon, Math.Min(1f, t * 3f));
+                var colour = Vector4.Lerp(tint, FateWon, Math.Min(1f, t * 3f));
                 dl.AddCircleFilled(s, rr, Draw2D.Color(colour, a * fade * 0.18f), 64);
                 dl.AddCircle(s, rr, Draw2D.Color(colour, a * fade), 64, (1.5f + 2.5f * (1f - t)) * px);
 
@@ -986,20 +989,20 @@ public sealed class MapOverlay : IDisposable
                     dl.AddLine(from, to, Draw2D.Color(FateWon, a * fade), 2f * px);
                 }
 
-                Draw2D.Label(dl, s - new Vector2(0f, rr + 10f * px + 12f * px * Ease(t)), "FATE complete", FateWon, a * fade, 0.95f, centered: true);
+                Draw2D.Label(dl, s - new Vector2(0f, rr + 10f * px + 12f * px * Ease(t)), m.Engagement ? "Engagement complete" : "FATE complete", FateWon, a * fade, 0.95f, centered: true);
                 break;
             }
             case FateOutcome.Failed:
             {
                 var rr = r * (1f - 0.15f * t);
-                var colour = Vector4.Lerp(FateTint, FateLost, Math.Min(1f, t * 3f));
+                var colour = Vector4.Lerp(tint, FateLost, Math.Min(1f, t * 3f));
                 dl.AddCircleFilled(s, rr, Draw2D.Color(colour, a * (1f - t) * 0.08f), 64);
                 dl.AddCircle(s, rr, Draw2D.Color(colour, a * (1f - t) * 0.6f), 64, 1.5f * px);
                 Draw2D.Label(dl, s - new Vector2(0f, rr + 10f * px), "Failed", FateLost, a * (1f - t), 0.9f, centered: true);
                 break;
             }
             default:
-                dl.AddCircle(s, r, Draw2D.Color(FateTint, a * (1f - t) * 0.55f), 64, 1.5f * px);
+                dl.AddCircle(s, r, Draw2D.Color(tint, a * (1f - t) * 0.55f), 64, 1.5f * px);
                 break;
         }
     }
@@ -1023,7 +1026,7 @@ public sealed class MapOverlay : IDisposable
     {
         var px = size / (24f * config.IconScale);
         var r = size * 0.62f;
-        var tint = new Vector4(1f, 0.62f, 0.25f, 1f);
+        var tint = fate.Engagement ? EngagementTint : FateTint;
 
         if (fate.Active)
         {

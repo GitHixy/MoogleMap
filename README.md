@@ -14,7 +14,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin for Final Fantasy XIV th
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Dalamud API](https://img.shields.io/badge/Dalamud%20API-15-6FB8E0)
-![Version](https://img.shields.io/badge/version-0.1.0-D6B068)
+![Version](https://img.shields.io/badge/version-0.1.1-D6B068)
 
 ---
 
@@ -38,7 +38,7 @@ Deep dungeon floors (and a few other places) have no map picture at all: the gam
 - **NPCs**, **treasure coffers**, **aetherytes**, **gathering points**, doors, exits and other things you can click.
 - **Quests in progress**: NPCs and objects with a quest icon over their heads (someone to talk to, something to hand in) shown with that same icon, quest objectives with their names, and objectives that are an area drawn as the game's light blue circle.
 - **Map icons and place names**, with the game's own icons.
-- **Quest markers**, your **flag** and running **FATEs**, each FATE with a ring that fills as it's completed and the time it has left. FATEs open out as they appear, flare gold with sparks when completed and grey out when failed. Party members, quest markers and the flag stay pinned to the rim when they're off the map, like a compass.
+- **Quest markers**, your **flag** and running **FATEs**, each FATE with a ring that fills as it's completed and the time it has left. FATEs open out as they appear, flare gold with sparks when completed and grey out when failed. Critical engagements in the Occult Crescent and Bozja show the same way, in blue. Party members, quest markers and the flag stay pinned to the rim when they're off the map, like a compass.
 - **Waymarks** (A to D, 1 to 4) where they're placed, and **signs** (attack, bind, ignore, shapes) over whoever they mark.
 - Enemies whose target is **you** in their own colour, and a turning **ring** around your current target.
 - In duties the **boss** gets a crown, a bigger marker, and its name and health always on show.

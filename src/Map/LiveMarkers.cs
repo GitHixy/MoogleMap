@@ -5,6 +5,7 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Fates;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
+using FFXIVClientStructs.FFXIV.Client.Game.InstanceContent;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using MoogleMap.Models;
@@ -80,6 +81,8 @@ public struct LiveMarker
     public float Leaving;
     /// <summary>FATEs leaving: how it ended.</summary>
     public FateOutcome Outcome;
+    /// <summary>FATEs: a critical engagement rather than a FATE.</summary>
+    public bool Engagement;
 }
 
 /// <summary>
@@ -115,11 +118,15 @@ public sealed class LiveMarkers
     /// <summary>Seconds a FATE's exit takes on the map.</summary>
     public const float FateExit = 1.1f;
 
-    /// <summary>FATEs seen on the last tick, with when each first showed up.</summary>
-    private readonly Dictionary<ushort, (LiveMarker Marker, double Since)> fates = new();
+    /// <summary>
+    /// FATEs seen on the last tick, with when each first showed up. Critical engagements share the
+    /// list, keyed above <see cref="EngagementKey"/> so their ids can't clash with a FATE's.
+    /// </summary>
+    private readonly Dictionary<uint, (LiveMarker Marker, double Since)> fates = new();
     /// <summary>FATEs on their way out, kept a moment longer so they can leave gracefully.</summary>
     private readonly List<(LiveMarker Marker, double Since)> leaving = [];
-    private readonly HashSet<ushort> seenThisTick = [];
+    private readonly HashSet<uint> seenThisTick = [];
+    private const uint EngagementKey = 0x10000;
 
     public void Update(Configuration config, MapInfo? map, double now)
     {
@@ -414,10 +421,13 @@ public sealed class LiveMarkers
             building.Add(marker);
         }
 
+        if (!Loading())
+            AddEngagements(now);
+
         // Gone from the table without an ending we saw: out of range, or finished between ticks.
         if (fates.Count > seenThisTick.Count)
         {
-            foreach (var id in new List<ushort>(fates.Keys))
+            foreach (var id in new List<uint>(fates.Keys))
             {
                 if (seenThisTick.Contains(id)) continue;
                 var last = fates[id].Marker;
@@ -437,6 +447,58 @@ public sealed class LiveMarkers
             }
 
             marker.Leaving = t;
+            building.Add(marker);
+        }
+    }
+
+    /// <summary>
+    /// Critical engagements in the Occult Crescent and Bozja: not FATEs to the game, so they're not
+    /// in the FATE table, but they come and go the same way and are shown as one.
+    /// </summary>
+    private unsafe void AddEngagements(double now)
+    {
+        DynamicEventContainer* container = null;
+        var crescent = PublicContentOccultCrescent.GetInstance();
+        if (crescent is not null) container = &crescent->DynamicEventContainer;
+        else
+        {
+            var bozja = PublicContentBozja.GetInstance();
+            if (bozja is not null) container = &bozja->DynamicEventContainer;
+        }
+        if (container is null) return;
+
+        foreach (ref readonly var ev in container->Events)
+        {
+            if (ev.DynamicEventId == 0) continue;
+            var id = EngagementKey + ev.DynamicEventId;
+
+            if (ev.State == DynamicEventState.Inactive)
+            {
+                if (fates.Remove(id, out var ended))
+                    Leave(ended.Marker, ev.Progress >= 100 || ended.Marker.Progress >= 0.999f ? FateOutcome.Completed : FateOutcome.Vanished, now);
+                continue;
+            }
+
+            ref readonly var data = ref ev.MapMarker;
+            seenThisTick.Add(id);
+            var since = fates.TryGetValue(id, out var known) ? known.Since : now;
+            var marker = new LiveMarker
+            {
+                Kind = MarkerKind.Fate,
+                Engagement = true,
+                Position = data.Position,
+                Radius = data.Radius,
+                Name = ev.Name.ToString(),
+                Icon = data.IconId,
+                Active = ev.State == DynamicEventState.Battle,
+                Progress = ev.Progress / 100f,
+                // Signing up and the battle each run on their own clock.
+                Remaining = ev.SecondsLeft > 0 ? ev.SecondsLeft : -1,
+                Age = (float)(now - since),
+                Leaving = -1f,
+            };
+
+            fates[id] = (marker, since);
             building.Add(marker);
         }
     }
