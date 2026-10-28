@@ -1,0 +1,99 @@
+name: Release
+
+# Bump <AssemblyVersion> in the .csproj and push to main: this builds the plugin,
+# publishes a GitHub release tagged v<AssemblyVersion> with latest.zip, and tells
+# the custom repo to refresh. Pushes that don't change the version do nothing.
+
+on:
+  push:
+    branches: [main]
+    paths: ["*.csproj"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PLUGIN: ${{ github.event.repository.name }}
+  CUSTOM_REPO: GitHixy/GitHixy-CustomRepo-FFXIV
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content "$env:PLUGIN.csproj")).Project.PropertyGroup.AssemblyVersion | Where-Object { $_ } | Select-Object -First 1
+          if (-not $version) { throw "No <AssemblyVersion> in $env:PLUGIN.csproj" }
+          $tag = "v$version"
+          git rev-parse -q --verify "refs/tags/$tag" | Out-Null
+          $exists = $LASTEXITCODE -eq 0
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($exists) { Write-Host "$tag already released, nothing to do." } else { Write-Host "Releasing $tag" }
+          exit 0
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.version.outputs.exists == 'false'
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Dalamud
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $dir = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+          Invoke-WebRequest https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath $dir -Force
+          Remove-Item dalamud.zip
+
+      - name: Build
+        if: steps.version.outputs.exists == 'false'
+        run: dotnet build -c Release
+
+      - name: Write release notes
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $previous = git describe --tags --abbrev=0 2>$null
+          if ($previous) {
+            $log = git log "$previous..HEAD" --no-merges --pretty=format:"- %s"
+            "## What's changed`n`n$($log -join "`n")" | Out-File notes.md -Encoding utf8
+          } else {
+            "First release." | Out-File notes.md -Encoding utf8
+          }
+          exit 0
+
+      - name: Publish release
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" "bin/Release/$env:PLUGIN/latest.zip" `
+            --title "$env:PLUGIN ${{ steps.version.outputs.version }}" `
+            --notes-file notes.md `
+            --target "${{ github.sha }}"
+
+      - name: Notify custom repo
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.CUSTOM_REPO_TOKEN }}
+        run: |
+          if (-not $env:GH_TOKEN) {
+            Write-Host "CUSTOM_REPO_TOKEN not set: the custom repo will pick this release up on its next scheduled run."
+            exit 0
+          }
+          gh api "repos/$env:CUSTOM_REPO/dispatches" -f event_type=plugin-released
