@@ -8,6 +8,7 @@
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin for Final Fantasy XIV that lays a transparent map right over the game, the way action RPGs do. Press your key and the layout around you appears on top of the world, with you in the middle and the map turning with your camera, so what's ahead on the map is what's ahead on screen.
 
+[![Website](https://img.shields.io/badge/Website-githixypluginffxiv.vercel.app-D6B068?logo=googlechrome&logoColor=white)](https://githixypluginffxiv.vercel.app/plugins/mooglemap)
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20me-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/GitHixy)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/9kjUjWDBkJ)
 
