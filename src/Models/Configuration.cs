@@ -32,6 +32,19 @@ public enum MapAnchor
     Character,
 }
 
+/// <summary>The outline of the map on screen.</summary>
+public enum MapShape
+{
+    /// <summary>A circle, or an ellipse when it's wider than tall or the other way round.</summary>
+    Round,
+    /// <summary>A rectangle with softened corners, as wide as it is tall.</summary>
+    Square,
+    /// <summary>A rectangle wider than it is tall.</summary>
+    Wide,
+    /// <summary>A rectangle taller than it is wide.</summary>
+    Tall,
+}
+
 /// <summary>Kinds of place that want different map views.</summary>
 public enum ContentKind
 {
@@ -49,20 +62,23 @@ public class ViewPreset
 {
     /// <summary>Screen pixels per yalm, at 1080p.</summary>
     public float Zoom { get; set; } = 5f;
-    /// <summary>Radius of the visible map as a fraction of screen height.</summary>
-    public float Radius { get; set; } = 0.42f;
-    /// <summary>How much of the circle's width is shown: 1 all of it, less trims the sides.</summary>
-    public float Width { get; set; } = 1f;
-    /// <summary>How much of the circle's height is shown: 1 all of it, less trims top and bottom.</summary>
-    public float Height { get; set; } = 1f;
     /// <summary>Multiplies the opacity of the whole map layer, markers excluded.</summary>
     public float MapOpacity { get; set; } = 0.85f;
 
+    // The size each place had before the map got one shape and size for everywhere. Read once, to
+    // carry it over, and never written back.
+    public float Radius { get; set; }
+    public float Width { get; set; } = 1f;
+    public float Height { get; set; } = 1f;
+    public bool ShouldSerializeRadius() => false;
+    public bool ShouldSerializeWidth() => false;
+    public bool ShouldSerializeHeight() => false;
+
     public static ViewPreset DefaultsFor(ContentKind kind) => kind switch
     {
-        ContentKind.Duty => new ViewPreset { Zoom = 6f, Radius = 0.42f, MapOpacity = 0.85f },
-        ContentKind.Town => new ViewPreset { Zoom = 4.5f, Radius = 0.42f, MapOpacity = 0.8f },
-        _ => new ViewPreset { Zoom = 2f, Radius = 0.45f, MapOpacity = 0.75f },
+        ContentKind.Duty => new ViewPreset { Zoom = 6f, MapOpacity = 0.85f },
+        ContentKind.Town => new ViewPreset { Zoom = 4.5f, MapOpacity = 0.8f },
+        _ => new ViewPreset { Zoom = 2f, MapOpacity = 0.75f },
     };
 }
 
@@ -70,7 +86,8 @@ public class ViewPreset
 [Serializable]
 public class Configuration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = CurrentVersion;
+    public const int CurrentVersion = 2;
 
     /// <summary>Master switch. Off, the key does nothing and nothing is drawn.</summary>
     public bool Enabled { get; set; } = true;
@@ -116,7 +133,43 @@ public class Configuration
     public float MarkerOpacity { get; set; } = 1f;
 
     // Placement
-    /// <summary>Zoom, size and opacity for each kind of place, so a dungeon and a field each look right.</summary>
+    public MapShape Shape { get; set; } = MapShape.Round;
+    /// <summary>Half the map's width and height, as fractions of screen height so a square stays square.</summary>
+    public Vector2 Size { get; set; } = new(DefaultSize, DefaultSize);
+    public const float DefaultSize = 0.42f;
+    public static readonly Vector2 MinSize = new(0.08f, 0.08f);
+    public static readonly Vector2 MaxSize = new(0.9f, 0.5f);
+    public static Vector2 ClampSize(Vector2 size) => Vector2.Clamp(size, MinSize, MaxSize);
+
+    /// <summary>How much wider than tall each shape starts out.</summary>
+    private static float Aspect(MapShape shape) => shape switch
+    {
+        MapShape.Wide => 1.8f,
+        MapShape.Tall => 0.65f,
+        _ => 1f,
+    };
+
+    /// <summary>Picks a shape, at its own proportions and about the same size as before.</summary>
+    public void SetShape(MapShape shape)
+    {
+        Shape = shape;
+        var scale = MathF.Sqrt(Size.X * Size.Y);
+        var aspect = MathF.Sqrt(Aspect(shape));
+        Size = ClampSize(new Vector2(scale * aspect, scale / aspect));
+    }
+
+    /// <summary>
+    /// Sets the size. A rectangle is named after its proportions, so one stretched out of square
+    /// reads as wide or tall; a round map stays round, as an ellipse.
+    /// </summary>
+    public void Resize(Vector2 size)
+    {
+        Size = ClampSize(size);
+        if (Shape == MapShape.Round) return;
+        var aspect = Size.X / Size.Y;
+        Shape = aspect > 1.08f ? MapShape.Wide : aspect < 0.92f ? MapShape.Tall : MapShape.Square;
+    }
+    /// <summary>Zoom and opacity for each kind of place, so a dungeon and a field each look right.</summary>
     public Dictionary<ContentKind, ViewPreset> Views { get; set; } = new();
     /// <summary>Zoom in on small places, like trial arenas, until they fill the map instead of a corner of it.</summary>
     public bool FitSmallAreas { get; set; } = true;
@@ -241,6 +294,21 @@ public class Configuration
 
     // Diagnostics
     public bool LogEvents { get; set; }
+
+    /// <summary>Brings settings saved by an older version up to date.</summary>
+    public void Migrate()
+    {
+        if (Version < 2)
+        {
+            // Size used to be kept per kind of place, as a circle trimmed at the sides or top and
+            // bottom. The duty view's carries over, as the closest round map.
+            var old = Views.TryGetValue(ContentKind.Duty, out var duty) && duty is { Radius: > 0f } ? duty : null;
+            if (old is not null)
+                Size = old.Radius * new Vector2(Math.Clamp(old.Width, 0.3f, 1f), Math.Clamp(old.Height, 0.3f, 1f));
+            Shape = MapShape.Round;
+        }
+        Version = CurrentVersion;
+    }
 
     /// <summary>The view for a kind of place, created from its defaults on first use.</summary>
     public ViewPreset ViewFor(ContentKind kind)

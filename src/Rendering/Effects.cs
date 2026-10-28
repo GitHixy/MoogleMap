@@ -28,7 +28,7 @@ public static class Effects
         var t = now % SweepEvery / SweepTime;
         if (t >= 1f) return null;
         var ease = 1f - (1f - t) * (1f - t);
-        return new SweepBand(view.Center, view.Radius * ease, 26f * view.PixelScale, (1f - t) * 0.9f);
+        return new SweepBand(view.Center, view.Extent * ease, 26f * view.PixelScale, (1f - t) * 0.9f);
     }
 
     /// <summary>A ring rippling out from the player's arrow every few seconds.</summary>

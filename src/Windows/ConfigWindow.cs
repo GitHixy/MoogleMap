@@ -127,6 +127,7 @@ public class ConfigWindow : Window
 
     protected override void OnClosed()
     {
+        plugin.Layout.Stop();
         capturing = null;
         pickedKind = false;
         if (saveAt != double.MaxValue)
@@ -412,8 +413,55 @@ public class ConfigWindow : Window
 
     private void DrawPlacement()
     {
+        Theme.SectionHeader("Shape and size", FontAwesomeIcon.Shapes);
+        Wrapped("The same everywhere you go. Pick a shape, then make it as big as you like, here or right on screen.");
+        ImGui.Dummy(new Vector2(0, 4));
+
+        Row("Shape");
+        var shape = (int)Config.Shape;
+        if (Theme.SegmentedControl("##Shape", ref shape, "Round", "Square", "Wide", "Tall"))
+        {
+            Config.SetShape((MapShape)shape);
+            changed = true;
+        }
+
+        // Width as a share of the screen's width and height of its height, which is how they look;
+        // stored against the height so a square stays square on any screen.
+        var screen = ImGui.GetMainViewport().Size;
+        var aspect = screen.X / Math.Max(screen.Y, 1f);
+        var size = Config.Size;
+        var scale = MathF.Sqrt(size.X * size.Y);
+        FloatRow("Size", scale, v => Config.Resize(size * (v / scale)), 0.1f, 0.6f, "%.2f");
+        HelpAfter("Makes the map bigger or smaller, keeping its proportions.");
+        FloatRow("Width", size.X * 2f / aspect, v => Config.Resize(size with { X = v * aspect * 0.5f }),
+            Configuration.MinSize.X * 2f / aspect, Math.Min(1f, Configuration.MaxSize.X * 2f / aspect), "%.2f");
+        HelpAfter("How much of the screen's width the map covers.");
+        FloatRow("Height", size.Y * 2f, v => Config.Resize(size with { Y = v * 0.5f }),
+            Configuration.MinSize.Y * 2f, Configuration.MaxSize.Y * 2f, "%.2f");
+        HelpAfter("How much of the screen's height the map covers.");
+
+        Row(string.Empty);
+        if (plugin.Layout.Editing
+                ? Theme.PrimaryButton("Done editing", new Vector2(150, 28))
+                : Theme.GhostButton("Edit on screen", new Vector2(150, 28), Theme.Gold))
+        {
+            if (plugin.Layout.Editing) plugin.Layout.Stop();
+            else plugin.Layout.Start();
+        }
+        HelpAfter("Shows the map's outline with handles: drag inside it to move the map, drag a corner or side to resize it, "
+                  + "and hold Shift to keep its proportions. The outline is only there while you edit.");
+        ImGui.SameLine(0, 12);
+        if (Theme.GhostButton("Reset", new Vector2(90, 28)))
+        {
+            Config.Shape = MapShape.Round;
+            Config.Size = new Vector2(Configuration.DefaultSize);
+            Config.Offset = Vector2.Zero;
+            changed = true;
+        }
+
+        ImGui.Dummy(new Vector2(0, 8));
         Theme.SectionHeader("View for each kind of place", FontAwesomeIcon.ExpandArrowsAlt);
-        Wrapped("Duties, towns and open fields each keep their own zoom, size and opacity, and the map switches between them "
+        Wrapped("Duties, towns and open fields each keep their own zoom and opacity, and the map switches between them "
                 + "as you travel. Zoom keys and the server bar change the one you're in.");
         ImGui.Dummy(new Vector2(0, 4));
 
@@ -438,13 +486,6 @@ public class ConfigWindow : Window
         ToggleRow("Centre small places", Config.CenterSmallAreas, v => Config.CenterSmallAreas = v,
             "When a whole place fits on the map, the map holds still on its middle and your arrow moves over it, instead of the "
             + "map following you and pushing part of the place off the edge. Zoom in past the fit and it follows you again.");
-        FloatRow("Radius", view.Radius, v => view.Radius = v, 0.15f, 0.6f, "%.2f");
-        HelpAfter("How big the map is, as a share of your screen height.");
-        FloatRow("Width", view.Width, v => view.Width = v, 0.3f, 1f, "%.2f");
-        HelpAfter("How much of the circle shows side to side. Lower trims the left and right off, without shrinking anything. "
-                  + "With a bigger radius, a lower height gives a wide strip that sees further left and right.");
-        FloatRow("Height", view.Height, v => view.Height = v, 0.3f, 1f, "%.2f");
-        HelpAfter("How much of the circle shows top to bottom. Lower trims the top and bottom off, without shrinking anything.");
         FloatRow("Map opacity", view.MapOpacity, v => view.MapOpacity = v, 0.1f, 1f, "%.2f");
         Row(string.Empty);
         if (Theme.GhostButton("Reset this view", new Vector2(150, 26)))
@@ -880,7 +921,7 @@ public class ConfigWindow : Window
         sb.AppendLine($"- Game language: {Plugin.ClientState.ClientLanguage}, territory {Plugin.ClientState.TerritoryType}, map {Plugin.ClientState.MapId}");
         sb.AppendLine($"- Map: {map?.Key ?? "-"} \"{map?.DisplayName}\", scale {map?.Scale:0.00}, offset {map?.Offset}, texture {OnOff(map?.HasTexture == true)}");
         sb.AppendLine($"- Processing: {plugin.Maps.Status}, picture {OnOff(plugin.Maps.FromPicture)}, paper {plugin.Maps.PaperShare:P0}, floor {plugin.Maps.FloorShare:P1}");
-        sb.AppendLine($"- Settings: trigger {Config.Trigger} on {Config.ToggleKey}, place {plugin.CurrentKind}, zoom {plugin.View.Zoom:0.0} (shown {plugin.Zoom:0.0}, area {plugin.Maps.AreaSize?.ToString("0") ?? "-"} y), radius {plugin.View.Radius:0.00}, "
+        sb.AppendLine($"- Settings: trigger {Config.Trigger} on {Config.ToggleKey}, place {plugin.CurrentKind}, zoom {plugin.View.Zoom:0.0} (shown {plugin.Zoom:0.0}, area {plugin.Maps.AreaSize?.ToString("0") ?? "-"} y), shape {Config.Shape} {Config.Size.X:0.00}x{Config.Size.Y:0.00}, "
                       + $"rotate {OnOff(Config.RotateWithCamera)}, anchor {Config.Anchor}, explore {OnOff(Config.ExploreUnmapped)}");
         sb.AppendLine($"- State: hidden {plugin.HiddenReason ?? "no"}, shown {OnOff(Config.Shown)}, frame errors {plugin.FrameErrors}, "
                       + $"explorer {plugin.ExplorerMode} {plugin.Explorer.FloorCells} cells / {plugin.Explorer.Raycasts} raycasts, fused {plugin.Maps.FusedCells}");

@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using Dalamud.Bindings.ImGui;
 
 namespace MoogleMap.Rendering;
 
@@ -10,21 +11,12 @@ namespace MoogleMap.Rendering;
 public readonly struct MapView
 {
     public Vector2 Center { get; init; }
-    /// <summary>Radius of the map's circle in pixels, before any trimming.</summary>
-    public float Radius { get; init; }
-    /// <summary>
-    /// How much of the width and height of the circle is shown, 0 to 1. (1, 1) is the whole
-    /// circle; (1, 0.5) trims it top and bottom to a wide oval, at the same scale.
-    /// </summary>
-    public Vector2 Stretch
-    {
-        get => stretch == Vector2.Zero ? Vector2.One : stretch;
-        init => stretch = value;
-    }
-
-    private readonly Vector2 stretch;
-    /// <summary>Where the map's rim starts to fade, as a fraction of the radius.</summary>
-    public float FadeStart { get; init; }
+    /// <summary>Half the map's width and height, in pixels.</summary>
+    public Vector2 Radii { get; init; }
+    /// <summary>An ellipse when true, a rectangle with softened corners otherwise.</summary>
+    public bool Round { get; init; }
+    /// <summary>How far in from the rim the map fades, in pixels, the same all the way round.</summary>
+    public float FadeWidth { get; init; }
     public Vector2 Origin { get; init; }
     /// <summary>Screen pixels per yalm.</summary>
     public float Scale { get; init; }
@@ -60,27 +52,77 @@ public readonly struct MapView
     /// <summary>Screen direction of a game rotation, where 0 faces south (+Z).</summary>
     public Vector2 Facing(float rotation) => Direction(new Vector2(MathF.Sin(rotation), MathF.Cos(rotation)));
 
-    /// <summary>Half the map's width and height, in pixels.</summary>
-    public Vector2 Radii => Stretch * Radius;
+    /// <summary>The shorter of the half width and half height.</summary>
+    public float Inradius => MathF.Min(Radii.X, Radii.Y);
 
-    /// <summary>How far out a screen point is: 0 at the centre, 1 on the rim, whatever the map's shape.</summary>
-    public float Reach(Vector2 screen) => ((screen - Center) / Radii).Length();
+    /// <summary>The furthest the rim gets from the centre: what a turning map has to cover.</summary>
+    public float Extent => Round ? MathF.Max(Radii.X, Radii.Y) : Radii.Length();
+
+    /// <summary>How round the rectangle's corners are, in pixels.</summary>
+    private float Corner => Inradius * 0.18f;
+
+    /// <summary>How far inside the rim a screen point is, in pixels: negative outside it.</summary>
+    public float Depth(Vector2 screen)
+    {
+        var p = screen - Center;
+        if (Round)
+        {
+            var length = p.Length();
+            var k = (p / Radii).Length();
+            return k < 1e-6f ? Inradius : length / k - length;
+        }
+
+        // A rounded rectangle's distance field.
+        var corner = Corner;
+        var q = Vector2.Abs(p) - Radii + new Vector2(corner);
+        return corner - Vector2.Max(q, Vector2.Zero).Length() - MathF.Min(MathF.Max(q.X, q.Y), 0f);
+    }
 
     /// <summary>Distance from the centre to the rim along a screen direction, in pixels.</summary>
     public float RimDistance(Vector2 direction)
     {
-        var length = (direction / Radii).Length();
-        return length < 1e-6f ? Radius : direction.Length() / length;
+        var length = direction.Length();
+        if (length < 1e-6f) return Inradius;
+        if (Round) return length / (direction / Radii).Length();
+
+        // Halving down the ray to where the rounded rectangle's edge is, close enough to the pixel.
+        var unit = direction / length;
+        float lo = 0f, hi = Extent;
+        for (var i = 0; i < 16; i++)
+        {
+            var mid = (lo + hi) * 0.5f;
+            if (Depth(Center + unit * mid) > 0f) lo = mid;
+            else hi = mid;
+        }
+        return lo;
     }
 
     /// <summary>How visible a point is: full inside, fading over the rim, gone outside.</summary>
     public float Fade(Vector2 screen)
     {
-        var t = Reach(screen);
-        if (t <= FadeStart) return 1f;
-        if (t >= 1f) return 0f;
-        var x = 1f - (t - FadeStart) / (1f - FadeStart);
+        var depth = Depth(screen);
+        if (depth >= FadeWidth) return 1f;
+        if (depth <= 0f) return 0f;
+        var x = depth / FadeWidth;
         return x * x * (3f - 2f * x);
+    }
+
+    /// <summary>Adds the map's outline, scaled about its centre, to the draw list's path.</summary>
+    public void PathOutline(ImDrawListPtr dl, float scale)
+    {
+        var radii = Radii * scale;
+        if (!Round)
+        {
+            dl.PathRect(Center - radii, Center + radii, Corner * scale);
+            return;
+        }
+
+        const int segments = 96;
+        for (var i = 0; i < segments; i++)
+        {
+            var a = MathF.PI * 2f * i / segments;
+            dl.PathLineTo(Center + new Vector2(MathF.Cos(a) * radii.X, MathF.Sin(a) * radii.Y));
+        }
     }
 
     /// <summary>Pulls a point inside the rim, for markers that should stay visible from afar.</summary>
@@ -88,7 +130,7 @@ public readonly struct MapView
     {
         var d = screen - Center;
         var rim = RimDistance(d);
-        var max = rim * FadeStart + (rim - rim * FadeStart) * 0.35f - inset;
+        var max = rim - FadeWidth * 0.65f - inset;
         var len = d.Length();
         clamped = len > max;
         return clamped ? Center + d / len * max : screen;

@@ -68,6 +68,7 @@ public sealed class Plugin : IDalamudPlugin
     public LiveMarkers Live { get; }
     public Explorer Explorer { get; }
     public MapOverlay Overlay { get; }
+    public LayoutEditor Layout { get; }
     public KeyWatcher Keys { get; } = new();
     public ServerBarEntry ServerBar { get; }
     public Trail Trail { get; } = new();
@@ -95,6 +96,7 @@ public sealed class Plugin : IDalamudPlugin
             Live = new LiveMarkers();
             Explorer = new Explorer();
             Overlay = new MapOverlay(this);
+            Layout = new LayoutEditor(this);
             ServerBar = new ServerBarEntry(this);
 
             ConfigWindow = new ConfigWindow(this);
@@ -405,10 +407,9 @@ public sealed class Plugin : IDalamudPlugin
             if (!Maps.FromPicture && (Maps.Current?.IsOpenWorld != false || MappingProgress is not null))
                 return null;
 
-            // The area's longest side spans most of the circle's width, at 1080p.
-            var view = View;
-            var shape = MathF.Sqrt(Math.Clamp(view.Width, 0.3f, 1f) * Math.Clamp(view.Height, 0.3f, 1f));
-            return 2f * view.Radius * shape * 1080f * 0.85f / size;
+            // The area's longest side spans most of the map, at 1080p.
+            var half = Models.Configuration.ClampSize(Configuration.Size);
+            return 2f * MathF.Sqrt(half.X * half.Y) * 1080f * 0.85f / size;
         }
     }
 
@@ -446,7 +447,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             var config = Configuration;
             if (!config.Enabled || HiddenReason is not null) return false;
-            if (config.PreviewWhileConfiguring && ConfigWindow.IsOpen) return true;
+            if (Layout.Editing || config.PreviewWhileConfiguring && ConfigWindow.IsOpen) return true;
             // In hold mode, the toggle (server bar, /mmap toggle) pins the map open on top of the key.
             return config.Trigger == TriggerMode.Hold ? holding || config.Shown : config.Shown;
         }
@@ -531,6 +532,7 @@ public sealed class Plugin : IDalamudPlugin
             start = FrameTimes.Start();
             Overlay.Draw(WantsMap, ImGui.GetIO().DeltaTime);
             Times.Add("drawing", start);
+            Layout.Draw(Overlay.View);
             ConfigWindow.Draw();
         }
         catch (Exception ex)

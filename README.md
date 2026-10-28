@@ -14,7 +14,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin for Final Fantasy XIV th
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Dalamud API](https://img.shields.io/badge/Dalamud%20API-15-6FB8E0)
-![Version](https://img.shields.io/badge/version-0.1.1-D6B068)
+![Version](https://img.shields.io/badge/version-0.1.2-D6B068)
 
 ---
 
@@ -58,7 +58,8 @@ Every layer can be turned off, and names for enemies, NPCs and objects are separ
 - Optional effects: a band of light running out across the walls every few seconds, and a ripple from your arrow. Follows Dalamud's reduced motion setting.
 - Optional zoom keys that only work while the map is up.
 - Hides in cutscenes, GPose and loading screens, and optionally in combat.
-- Zoom, size and opacity are kept **per kind of place** - duties, towns, open fields - and switch as you travel.
+- **Round, square, wide or tall**, at any size: drag it into place and resize it right on screen. Its outline only shows while you edit.
+- Zoom and opacity are kept **per kind of place** - duties, towns, open fields - and switch as you travel.
 - Colours, rotation and position are all yours to tune, with the map shown live while the settings are open.
 
 ## Getting started

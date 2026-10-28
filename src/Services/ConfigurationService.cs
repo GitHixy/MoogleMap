@@ -53,6 +53,7 @@ public class ConfigurationService : IDisposable
                 var config = JsonConvert.DeserializeObject<Configuration>(json);
                 if (config != null)
                 {
+                    config.Migrate();
                     Plugin.Log.Debug("Configuration loaded from {ConfigPath}", configFilePath);
                     return config;
                 }

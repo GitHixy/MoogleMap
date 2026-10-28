@@ -53,8 +53,12 @@ public sealed class MapOverlay : IDisposable
     /// <summary>How far the fade in has got, 0 to 1.</summary>
     public float Shown => shown;
 
+    /// <summary>Where the map was drawn this frame, or null when it wasn't.</summary>
+    public MapView? View { get; private set; }
+
     public void Draw(bool visible, float dt)
     {
+        View = null;
         var config = plugin.Configuration;
         var reduced = plugin.ReducedMotion;
 
@@ -92,12 +96,13 @@ public sealed class MapOverlay : IDisposable
             hold = MoveTowards(hold, wanted, dt * 2.5f);
 
         var view = BuildView(config, player.Value, reduced);
+        View = view;
         var dl = ImGui.GetBackgroundDrawList();
         UpdateProgress(dt);
 
         // Open game windows stay on top: draw only into the parts of the screen they leave free.
         var viewport = ImGui.GetMainViewport();
-        var reach = new Vector2(view.Radius + 40f * view.PixelScale);
+        var reach = view.Radii + new Vector2(40f * view.PixelScale);
         var start = FrameTimes.Start();
         var free = config.StayUnderGameWindows
             ? GameWindows.FreeAreas(viewport.Pos, viewport.Size, view.Center - reach, view.Center + reach, config.IgnoredWindows, config.StayUnderHud, config.StayUnderMessages)
@@ -204,7 +209,7 @@ public sealed class MapOverlay : IDisposable
         var width = Math.Max(text.X + (field ? 22f : 36f) * px, (field ? 120f : 190f) * px);
         var height = text.Y + (field ? 12f : 20f) * px;
         var centre = field
-            ? view.Center + new Vector2(0f, view.Radii.Y * view.FadeStart * 0.9f - height * 0.5f)
+            ? view.Center + new Vector2(0f, (view.Radii.Y - view.FadeWidth) * 0.9f - height * 0.5f)
             : view.Center - new Vector2(0f, 46f * px + height * 0.5f);
         var min = centre - new Vector2(width, height) * 0.5f;
         var max = centre + new Vector2(width, height) * 0.5f;
@@ -239,14 +244,14 @@ public sealed class MapOverlay : IDisposable
         // A slight grow as it fades in sells the "unfolding" without getting in the way.
         var ease = shown * shown * (3f - 2f * shown);
         var grow = reduced ? 1f : 0.94f + 0.06f * ease;
+        var radii = Configuration.ClampSize(config.Size) * viewport.Size.Y * grow;
 
         return new MapView
         {
             Center = center,
-            Radius = plugin.View.Radius * viewport.Size.Y * grow,
-            // Width and height only trim the circle; its size and the map's scale stay put.
-            Stretch = new Vector2(Math.Clamp(plugin.View.Width, 0.3f, 1f), Math.Clamp(plugin.View.Height, 0.3f, 1f)),
-            FadeStart = 1f - Math.Clamp(config.EdgeFade, 0.02f, 0.9f),
+            Radii = radii,
+            Round = config.Shape == MapShape.Round,
+            FadeWidth = Math.Clamp(config.EdgeFade, 0.02f, 0.9f) * Math.Min(radii.X, radii.Y),
             Origin = Vector2.Lerp(new Vector2(player.X, player.Z), middle, hold * hold * (3f - 2f * hold)),
             Scale = zoom * pixelScale * grow,
             Cos = cos,
@@ -359,7 +364,7 @@ public sealed class MapOverlay : IDisposable
             Any = false;
 
             var pixelsPerTexel = view.Scale / map.Scale;
-            var reach = view.Radius / pixelsPerTexel;
+            var reach = view.Extent / pixelsPerTexel;
             var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
             var min = Vector2.Clamp(centre - new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
             var max = Vector2.Clamp(centre + new Vector2(reach), Vector2.Zero, new Vector2(MapInfo.TextureSize));
@@ -451,7 +456,7 @@ public sealed class MapOverlay : IDisposable
             Frame = frame;
             Lines.Clear();
 
-            var reach = view.Radius / (view.Scale / map.Scale);
+            var reach = view.Extent / (view.Scale / map.Scale);
             var centre = map.WorldToTexture(new Vector3(view.Origin.X, 0f, view.Origin.Y));
             var min = centre - new Vector2(reach);
             var max = centre + new Vector2(reach);
@@ -637,24 +642,18 @@ public sealed class MapOverlay : IDisposable
         var px = view.PixelScale;
         var colour = config.EdgeColor;
 
-        var radii = view.Radii * ease;
-        Ring(dl, view.Center, radii, Draw2D.Color(colour, fade * 0.25f), 10f * px);
-        Ring(dl, view.Center, radii, Draw2D.Color(colour, fade * 0.9f), 2.5f * px);
+        Ring(dl, view, ease, Draw2D.Color(colour, fade * 0.25f), 10f * px);
+        Ring(dl, view, ease, Draw2D.Color(colour, fade * 0.9f), 2.5f * px);
 
-        var echo = view.Radii * Math.Max(0f, ease - 0.12f);
-        if (echo.X > 2f && echo.Y > 2f)
-            Ring(dl, view.Center, echo, Draw2D.Color(colour, fade * 0.35f), 1.5f * px);
+        var echo = Math.Max(0f, ease - 0.12f);
+        if (view.Inradius * echo > 2f)
+            Ring(dl, view, echo, Draw2D.Color(colour, fade * 0.35f), 1.5f * px);
     }
 
-    /// <summary>A ring the shape of the map: a circle, or an ellipse when it's stretched.</summary>
-    private static void Ring(ImDrawListPtr dl, Vector2 centre, Vector2 radii, uint colour, float thickness)
+    /// <summary>A ring the shape of the map, scaled about its centre.</summary>
+    private static void Ring(ImDrawListPtr dl, MapView view, float scale, uint colour, float thickness)
     {
-        const int segments = 96;
-        for (var i = 0; i < segments; i++)
-        {
-            var a = MathF.PI * 2f * i / segments;
-            dl.PathLineTo(centre + new Vector2(MathF.Cos(a) * radii.X, MathF.Sin(a) * radii.Y));
-        }
+        view.PathOutline(dl, scale);
         dl.PathStroke(colour, ImDrawFlags.Closed, thickness);
     }
 
